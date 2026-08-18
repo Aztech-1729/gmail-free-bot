@@ -30,8 +30,11 @@ class BotAPI:
         return self._call("getMe", {})
 
     def get_updates(self, offset: int, timeout: int = 30):
+        # read timeout must exceed the long-poll hold (timeout) with margin —
+        # flaky networks otherwise trigger spurious read timeouts.
         return self._call("getUpdates", {"offset": offset, "timeout": timeout,
-                                         "allowed_updates": ["message", "callback_query"]})
+                                         "allowed_updates": ["message", "callback_query"]},
+                          timeout=timeout + 40)
 
     def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
         p = {"chat_id": chat_id, "text": text}
