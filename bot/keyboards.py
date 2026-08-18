@@ -1,0 +1,57 @@
+"""Keyboard builders — plain Bot API dicts with 9.4 colored styles.
+
+Styles: "primary" (blue) · "danger" (red) · "success" (green).
+"""
+
+
+def _btn(text, style=None):
+    b = {"text": text}
+    if style:
+        b["style"] = style
+    return b
+
+
+def main_menu():
+    """Colored reply keyboard (persistent at the bottom)."""
+    return {
+        "keyboard": [
+            [_btn("➕ Generate Gmail", "primary")],
+            [_btn("📬 My Mails", "success"), _btn("🗑 Delete Mail", "danger")],
+            [_btn("📊 Stats"), _btn("❓ Help")],
+        ],
+        "resize_keyboard": True,
+    }
+
+
+def mail_actions(mail_id):
+    return {"inline_keyboard": [
+        [{"text": "📥 Check Inbox", "callback_data": f"check:{mail_id}", "style": "primary"},
+         {"text": "🗑 Delete", "callback_data": f"del:{mail_id}", "style": "danger"}],
+    ]}
+
+
+def mail_list_keyboard(mails, page=0, page_size=6):
+    total = len(mails)
+    start = page * page_size
+    chunk = mails[start:start + page_size]
+    rows = []
+    for m in chunk:
+        rows.append([
+            {"text": f"📥 {m['address']}", "callback_data": f"check:{m['id']}", "style": "primary"},
+            {"text": "🗑", "callback_data": f"del:{m['id']}", "style": "danger"},
+        ])
+    nav = []
+    if start > 0:
+        nav.append({"text": "⬅️ Prev", "callback_data": f"page:{page - 1}"})
+    if start + page_size < total:
+        nav.append({"text": "Next ➡️", "callback_data": f"page:{page + 1}"})
+    if nav:
+        rows.append(nav)
+    return {"inline_keyboard": rows}
+
+
+def confirm_delete(mail_id):
+    return {"inline_keyboard": [
+        [{"text": "✅ Yes, delete it", "callback_data": f"delok:{mail_id}", "style": "danger"}],
+        [{"text": "❌ Cancel", "callback_data": "delno", "style": "success"}],
+    ]}

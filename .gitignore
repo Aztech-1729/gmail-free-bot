@@ -1,0 +1,17 @@
+# runtime data (local only)
+data/
+*.sqlite
+*.db
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# os / editor
+.DS_Store
+*.session
+*.session-journal
+
+# SECRETS — never commit real credentials (repo is PUBLIC)
+.env
