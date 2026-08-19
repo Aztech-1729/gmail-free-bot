@@ -37,7 +37,7 @@ def mail_list_keyboard(mails, page=0, page_size=6):
     chunk = mails[start:start + page_size]
     rows = []
     for m in chunk:
-        label = m.get("plain_form") or m["address"]
+        label = m["address"]
         rows.append([
             {"text": f"📥 {label}", "callback_data": f"check:{m['id']}", "style": "primary"},
             {"text": "🗑", "callback_data": f"del:{m['id']}", "style": "danger"},

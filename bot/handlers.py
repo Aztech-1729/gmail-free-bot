@@ -134,14 +134,14 @@ class Handler:
             self.api.edit_message_text(
                 chat_id, status_id,
                 f"✅ <b>Your gmail is ready!</b>\n\n"
-                f"📧 <b>{esc(plain)}</b>\n\n"
+                f"📧 <b>{esc(address)}</b>\n\n"
                 f"Use it anywhere an OTP is needed — I'll forward every mail "
                 f"here instantly with HTML + raw files.",
                 parse_mode="HTML", reply_markup=kb.mail_actions(mail_id))
         else:
             self.api.send_message(
                 chat_id,
-                f"✅ <b>Your gmail is ready!</b>\n\n📧 <b>{esc(plain)}</b>\n",
+                f"✅ <b>Your gmail is ready!</b>\n\n📧 <b>{esc(address)}</b>\n",
                 parse_mode="HTML", reply_markup=kb.mail_actions(mail_id))
 
     # ------------------------------------------------------------------ #
@@ -153,7 +153,7 @@ class Handler:
                 "You don't have any mails yet.\nPress ➕ Generate Gmail to create one!",
                 reply_markup=kb.main_menu())
             return
-        body = "\n".join(f"{i+1}. <code>{esc(m.get('plain_form') or m['address'])}</code>" for i, m in enumerate(mails))
+        body = "\n".join(f"{i+1}. <code>{esc(m['address'])}</code>" for i, m in enumerate(mails))
         self.api.send_message(
             chat_id,
             f"📬 <b>Your mails</b>\n\n{body}\n\n[📥 Check] [🗑 Delete] per row",
@@ -215,7 +215,7 @@ class Handler:
             page = int(data.split(":", 1)[1])
             mails = db.list_mails(user_id)
             if mails:
-                body = "\n".join(f"{i+1}. <code>{esc(m.get('plain_form') or m['address'])}</code>" for i, m in enumerate(mails))
+                body = "\n".join(f"{i+1}. <code>{esc(m['address'])}</code>" for i, m in enumerate(mails))
                 self.api.edit_message_text(
                     chat_id, message_id,
                     f"📬 <b>Your mails</b>\n\n{body}\n\n[📥 Check] [🗑 Delete] per row",
@@ -248,12 +248,12 @@ class Handler:
         if not msgs:
             self.api.send_message(
                 chat_id,
-                f"📭 <b>Inbox empty</b>\n{esc(mail.get('plain_form') or mail['address'])}\n\n"
+                f"📭 <b>Inbox empty</b>\n{esc(mail['address'])}\n\n"
                 f"Send something to this address and I'll forward it instantly.",
                 parse_mode="HTML")
             return
         self.api.send_message(
-            chat_id, f"📬 <b>{esc(mail.get('plain_form') or mail['address'])}</b> — {len(msgs)} message(s):",
+            chat_id, f"📬 <b>{esc(mail['address'])}</b> — {len(msgs)} message(s):",
             parse_mode="HTML")
         for m in msgs[:8]:
             codes = []

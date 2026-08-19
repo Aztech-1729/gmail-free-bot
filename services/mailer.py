@@ -89,9 +89,9 @@ class Mailer:
     def _deliver(self, mail: dict, msg: dict):
         user_id = mail["user_id"]
         dotted = mail["address"]
-        plain_form = mail.get("plain_form") or dotted
-        # display the PLAIN form as the primary address
-        show_addr = plain_form if plain_form != dotted else dotted
+        # display the EXACT minted (dotted) address — Emailnator indexes and
+        # lists messages only under this form, so users must send to it
+        show_addr = dotted
 
         message_id = msg["messageID"]
         sender = msg.get("from", "Unknown")
