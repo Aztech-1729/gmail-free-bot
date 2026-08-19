@@ -90,6 +90,11 @@ def main():
                 for u in updates["result"]:
                     offset = max(offset, u["update_id"] + 1)
                     handler.handle_update(u)
+            elif updates.get("error_code") == 409:
+                # Another instance (e.g. the VPS bot) owns long polling —
+                # exit quietly instead of fighting over getUpdates.
+                log.warning("409 conflict — another bot instance is polling. Exiting.")
+                sys.exit(0)
         except KeyboardInterrupt:
             break
         except Exception as e:

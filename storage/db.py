@@ -31,9 +31,11 @@ class MongoStore:
         self._users = self._db["users"]
         self._mails = self._db["mails"]
         self._delivered = self._db["delivered"]
+        self._baseline = self._db["baseline"]
         # unique indexes (idempotent; _id is already unique implicitly)
         self._mails.create_index("address", unique=True)
         self._delivered.create_index([("mail_id", 1), ("message_id", 1)], unique=True)
+        self._baseline.create_index([("mail_id", 1), ("message_id", 1)], unique=True)
         self.backend = "mongodb"
 
     def add_user(self, user_id, username=""):
@@ -69,6 +71,7 @@ class MongoStore:
         res = self._mails.delete_one({"_id": oid})
         if res.deleted_count:
             self._delivered.delete_many({"mail_id": mail_id})
+            self._baseline.delete_many({"mail_id": mail_id})
         return res.deleted_count > 0
 
     def count_mails(self, user_id):
@@ -88,6 +91,22 @@ class MongoStore:
                  "delivered_at": self._now()})
         except Exception:
             pass  # duplicate — already delivered
+
+    # ---------------- baseline (pre-existing pool mail) ----------------
+    def mark_baseline(self, mail_id, message_ids):
+        """Mark messages that existed BEFORE the user generated the address,
+        so the poller never forwards old pool mail."""
+        for mid in message_ids:
+            try:
+                self._baseline.insert_one(
+                    {"mail_id": mail_id, "message_id": mid,
+                     "baselined_at": self._now()})
+            except Exception:
+                pass  # duplicate
+
+    def is_baseline(self, mail_id, message_id) -> bool:
+        return self._baseline.count_documents(
+            {"mail_id": mail_id, "message_id": message_id}, limit=1) > 0
 
     def delivered_count(self, user_id):
         # delivered.mail_id stores the string id (same as mails._id stringified)
@@ -120,6 +139,7 @@ class SqliteStore:
     CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, joined_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS mails (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, address TEXT NOT NULL UNIQUE, plain_form TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS delivered (mail_id INTEGER NOT NULL, message_id TEXT NOT NULL, delivered_at TEXT DEFAULT (datetime('now')), PRIMARY KEY (mail_id, message_id));
+    CREATE TABLE IF NOT EXISTS baseline (mail_id INTEGER NOT NULL, message_id TEXT NOT NULL, baselined_at TEXT DEFAULT (datetime('now')), PRIMARY KEY (mail_id, message_id));
     CREATE INDEX IF NOT EXISTS idx_mails_user ON mails(user_id);
     """
 
@@ -156,6 +176,7 @@ class SqliteStore:
         with self._lock:
             cur = self.conn.execute("DELETE FROM mails WHERE id = ?", (mail_id,))
             self.conn.execute("DELETE FROM delivered WHERE mail_id = ?", (mail_id,))
+            self.conn.execute("DELETE FROM baseline WHERE mail_id = ?", (mail_id,))
             self.conn.commit()
             return cur.rowcount > 0
 
@@ -175,6 +196,16 @@ class SqliteStore:
         with self._lock:
             self.conn.execute("INSERT OR IGNORE INTO delivered (mail_id, message_id) VALUES (?, ?)", (mail_id, message_id))
             self.conn.commit()
+
+    def mark_baseline(self, mail_id, message_ids):
+        with self._lock:
+            for mid in message_ids:
+                self.conn.execute("INSERT OR IGNORE INTO baseline (mail_id, message_id) VALUES (?, ?)", (mail_id, mid))
+            self.conn.commit()
+
+    def is_baseline(self, mail_id, message_id):
+        with self._lock:
+            return self.conn.execute("SELECT 1 FROM baseline WHERE mail_id = ? AND message_id = ?", (mail_id, message_id)).fetchone() is not None
 
     def delivered_count(self, user_id):
         with self._lock:

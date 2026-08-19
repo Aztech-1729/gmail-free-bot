@@ -35,13 +35,13 @@ def _as_int(value, default=0):
         return default
 
 
-POLL_INTERVAL = _as_int(os.environ.get("POLL_INTERVAL") or ENV.get("POLL_INTERVAL", "10"), 10)
+POLL_INTERVAL = _as_int(os.environ.get("POLL_INTERVAL") or ENV.get("POLL_INTERVAL", "5"), 5)
 
 MONGO_URI = os.environ.get("MONGO_URI") or ENV.get("MONGO_URI", "")
 MONGO_DB = os.environ.get("MONGO_DB") or ENV.get("MONGO_DB", "gmailotp")
 
-# Per-user generate cooldown (seconds) — prevents accidental hammering, still unlimited overall.
-GENERATE_COOLDOWN = 1.5
+# Per-user generate cooldown (seconds) — near-instant, still unlimited overall.
+GENERATE_COOLDOWN = 0.5
 
 
 def is_configured() -> bool:

@@ -27,6 +27,7 @@ def mail_actions(mail_id):
     return {"inline_keyboard": [
         [{"text": "📥 Check Inbox", "callback_data": f"check:{mail_id}", "style": "primary"},
          {"text": "🗑 Delete", "callback_data": f"del:{mail_id}", "style": "danger"}],
+        [{"text": "➕ Generate another", "callback_data": "genmore", "style": "success"}],
     ]}
 
 
@@ -36,8 +37,9 @@ def mail_list_keyboard(mails, page=0, page_size=6):
     chunk = mails[start:start + page_size]
     rows = []
     for m in chunk:
+        label = m.get("plain_form") or m["address"]
         rows.append([
-            {"text": f"📥 {m['address']}", "callback_data": f"check:{m['id']}", "style": "primary"},
+            {"text": f"📥 {label}", "callback_data": f"check:{m['id']}", "style": "primary"},
             {"text": "🗑", "callback_data": f"del:{m['id']}", "style": "danger"},
         ])
     nav = []

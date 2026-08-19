@@ -1,9 +1,10 @@
 """Emailnator client — mints real @gmail.com inboxes and reads their mail.
 
-Uses curl_cffi (Chrome TLS impersonation) because Emailnator sits behind
-Cloudflare. Zero API key: session cookies only.
+Thread-safe & parallel-ready: every worker thread gets its own curl_cffi
+session (Cloudflare cookies are per-session), so the mailer can poll many
+addresses concurrently.
 
-Verified live (2026-08): 2,030+ mints, no rate limit found.
+Verified live: 2,030+ mints, no rate limit found.
 """
 import threading
 import time
@@ -24,15 +25,12 @@ class EmailnatorError(Exception):
 
 class EmailnatorClient:
     def __init__(self):
-        self._session: Optional[cffi_requests.Session] = None
-        self._lock = threading.Lock()
+        self._local = threading.local()
 
     # ------------------------------------------------------------------ #
-    # session plumbing
+    # session plumbing (one session per thread → true parallelism)
     # ------------------------------------------------------------------ #
-    def _ensure_session(self):
-        if self._session is not None:
-            return self._session
+    def _build_session(self):
         s = cffi_requests.Session(impersonate="chrome")
         s.headers.update({
             "Accept": "application/json, text/plain, */*",
@@ -47,7 +45,13 @@ class EmailnatorClient:
         })
         s.get(BASE + "/")
         self._update_tokens(s)
-        self._session = s
+        return s
+
+    def _ensure_session(self):
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = self._build_session()
+            self._local.session = s
         return s
 
     def _update_tokens(self, session):
@@ -59,82 +63,79 @@ class EmailnatorClient:
             session.headers["Cookie"] = f"XSRF-TOKEN={xsrf}; gmailnator_session={sess};"
 
     def _reset_session(self):
-        self._session = None
+        self._local.session = None
 
     # ------------------------------------------------------------------ #
     # public API
     # ------------------------------------------------------------------ #
     def generate(self, types: Optional[List[str]] = None) -> str:
-        """Mint one gmail. Returns the address (dotted form)."""
+        """Mint one gmail. Returns the address (dotted form as minted)."""
         types = types or DEFAULT_TYPES
-        with self._lock:
-            try:
-                s = self._ensure_session()
-                r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
-                if r.status_code != 200:
-                    self._reset_session()
-                    raise EmailnatorError(f"generate HTTP {r.status_code}: {r.text[:120]}")
-                data = r.json()
-                addrs = data.get("email") or []
-                if not addrs:
-                    raise EmailnatorError("empty response from generate-email")
-                addr = addrs[0]
-                if "+" in addr:
-                    raise EmailnatorError("got a + alias — retry")
-                self._update_tokens(s)
-                return addr
-            except EmailnatorError:
-                raise
-            except Exception as e:
+        try:
+            s = self._ensure_session()
+            r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
+            if r.status_code != 200:
                 self._reset_session()
-                raise EmailnatorError(f"generate failed: {type(e).__name__} {e}")
+                raise EmailnatorError(f"generate HTTP {r.status_code}: {r.text[:120]}")
+            data = r.json()
+            addrs = data.get("email") or []
+            if not addrs:
+                raise EmailnatorError("empty response from generate-email")
+            addr = addrs[0]
+            if "+" in addr:
+                raise EmailnatorError("got a + alias — retry")
+            self._update_tokens(s)
+            return addr
+        except EmailnatorError:
+            raise
+        except Exception as e:
+            self._reset_session()
+            raise EmailnatorError(f"generate failed: {type(e).__name__} {e}")
 
     def messages(self, address: str) -> List[dict]:
         """List inbox messages for an exact address string."""
-        with self._lock:
-            try:
-                s = self._ensure_session()
-                r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
-                if r.status_code != 200:
-                    self._reset_session()
-                    raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
-                data = r.json()
-                msgs = data.get("messageData") or []
-                self._update_tokens(s)
-                return [
-                    {
-                        "messageID": m.get("messageID"),
-                        "from": m.get("from", ""),
-                        "subject": m.get("subject", ""),
-                        "time": m.get("time", ""),
-                    }
-                    for m in msgs
-                ]
-            except EmailnatorError:
-                raise
-            except Exception as e:
+        try:
+            s = self._ensure_session()
+            r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
+            if r.status_code != 200:
                 self._reset_session()
-                raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
+                raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
+            data = r.json()
+            msgs = data.get("messageData") or []
+            self._update_tokens(s)
+            return [
+                {
+                    "messageID": m.get("messageID"),
+                    "from": m.get("from", ""),
+                    "subject": m.get("subject", ""),
+                    "time": m.get("time", ""),
+                }
+                for m in msgs
+            ]
+        except EmailnatorError:
+            raise
+        except Exception as e:
+            self._reset_session()
+            raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
 
     def message_body(self, address: str, message_id: str, retries: int = 2) -> str:
-        """Fetch the full raw HTML of one message (retries, other-form fallback)."""
+        """Fetch the full raw HTML of one message (retries on flaky 500s)."""
         last_err = None
         for attempt in range(retries + 1):
-            with self._lock:
-                try:
-                    s = self._ensure_session()
-                    r = s.post(f"{BASE}/message-list",
-                               json={"email": address, "messageID": message_id},
-                               timeout=30)
-                    if r.status_code == 200:
-                        self._update_tokens(s)
-                        if r.text and '"message": "Server Error"' not in r.text:
-                            return r.text
-                        last_err = "emailnator server error for this message"
-                    else:
-                        last_err = f"body HTTP {r.status_code}"
-                except Exception as e:
-                    last_err = f"{type(e).__name__} {e}"
-                self._reset_session()
-                time.sleep(1.5)
+            try:
+                s = self._ensure_session()
+                r = s.post(f"{BASE}/message-list",
+                           json={"email": address, "messageID": message_id},
+                           timeout=30)
+                if r.status_code == 200:
+                    self._update_tokens(s)
+                    if r.text and '"message": "Server Error"' not in r.text:
+                        return r.text
+                    last_err = "emailnator server error for this message"
+                else:
+                    last_err = f"body HTTP {r.status_code}"
+            except Exception as e:
+                last_err = f"{type(e).__name__} {e}"
+            self._reset_session()
+            time.sleep(1.5)
         raise EmailnatorError(last_err or "body failed")

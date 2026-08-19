@@ -18,10 +18,17 @@ class BotAPI:
     def _call(self, method: str, params: dict, files=None, timeout=60):
         url = API.format(token=self.token, method=method)
         if files:
-            r = self.session.post(url, data=params, files=files, timeout=timeout)
+            # multipart — drop the JSON content-type; requests builds the
+            # correct multipart header when files= is present.
+            r = self.session.post(url, data=params, files=files, timeout=timeout,
+                                  headers={"Content-Type": None})
         else:
             r = self.session.post(url, data=json.dumps(params), timeout=timeout)
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError:
+            log.warning("Bot API %s returned non-JSON: %s %s", method, r.status_code, r.text[:200])
+            return {"ok": False, "description": f"non-JSON response {r.status_code}"}
         if not data.get("ok"):
             log.warning("Bot API %s failed: %s", method, data)
         return data
@@ -53,13 +60,18 @@ class BotAPI:
         return self._call("editMessageText", p)
 
     def send_document(self, chat_id, file_path, caption=None, parse_mode=None):
+        """Send a file as a document. Uses an explicit (filename, bytes) tuple
+        so Telegram always receives the right name/extension."""
+        import os as _os
         p = {"chat_id": chat_id}
         if caption:
             p["caption"] = caption
         if parse_mode:
             p["parse_mode"] = parse_mode
+        filename = _os.path.basename(file_path)
         with open(file_path, "rb") as f:
-            return self._call("sendDocument", p, files={"document": f})
+            content = f.read()
+        return self._call("sendDocument", p, files={"document": (filename, content)})
 
     def answer_callback(self, callback_query_id, text=None, alert=False):
         p = {"callback_query_id": callback_query_id}

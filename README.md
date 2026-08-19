@@ -2,7 +2,7 @@
 
 **Free, unlimited real `@gmail.com` addresses inside Telegram — with instant OTP forwarding.**
 
-- Press a button → get a fresh gmail
+- Press a button → get a fresh gmail (**plain form** — no dots, no `+`; the dotted alias is polled invisibly)
 - Any mail arriving at that address → forwarded to you **instantly** as:
   1. 📝 a summary with **OTP codes auto-extracted**
   2. 🌐 an **`.html` file** of the email
@@ -42,7 +42,7 @@ You'll see `Bot online: @your_bot` — done.
 
 | Button | Color | Action |
 |---|---|---|
-| ➕ Generate Gmail | 🔵 primary | Mints a fresh `@gmail.com` + shows its plain form |
+| ➕ Generate Gmail | 🔵 primary | Mints a fresh `@gmail.com` — **shown in plain form only** |
 | 📬 My Mails | 🟢 success | Paged list of your addresses |
 | 🗑 Delete Mail | 🔴 danger | Pick an address to remove |
 | 📊 Stats | default | Your mailboxes + delivered messages |
@@ -50,6 +50,7 @@ You'll see `Bot online: @your_bot` — done.
 
 ### Per-mail inline buttons
 - **📥 Check Inbox** (🔵 primary) — manually pull the current inbox
+- **➕ Generate another** (🟢 success) — one tap to mint the next address
 - **🗑 Delete** (🔴 danger) — with confirmation: **✅ Yes, delete it** (🔴) / **❌ Cancel** (🟢)
 
 ### Incoming mail — instant triple delivery
@@ -58,7 +59,13 @@ For every new email:
 2. **`<id>.html`** — the email as a document
 3. **`<id>_raw.eml`** — raw headers + original body
 
-Polling runs every `POLL_INTERVAL` seconds (default 10) and watches **both** the dotted and plain address forms.
+Polling runs every `POLL_INTERVAL` seconds (default **5**) and watches **both** the dotted and plain address forms. All mailboxes are polled **in parallel** (8 workers, per-thread sessions), so delivery is instant even with hundreds of mails.
+
+### Old-mail protection (baseline)
+Pooled addresses arrive with a history of someone else's mail. At **generate time** the bot snapshots every pre-existing message as *baseline* — only mail arriving **after** that moment is ever forwarded (or shown in Check Inbox). No old spam, ever.
+
+### Attachment guarantee
+Files are sent **before** the summary: if the `.html` / `.eml` upload fails, nothing is marked delivered and the bot retries next poll — so you never get a summary without its files.
 
 ---
 
@@ -90,6 +97,7 @@ telegram-otp-bot/
 | `users` | `{_id: user_id, username, joined_at}` |
 | `mails` | `{_id, user_id, address, plain_form, created_at}` — unique index on `address` |
 | `delivered` | `{_id, mail_id, message_id, delivered_at}` — unique compound index (dedupe) |
+| `baseline` | `{_id, mail_id, message_id, baselined_at}` — old pool mail snapshot at generate time; **never forwarded** |
 
 Configure with `MONGO_URI` / `MONGO_DB` in `.env`. If Mongo is unreachable, the bot **auto-falls back to local SQLite** and logs a warning — it never crashes on storage failure. (Both paths verified live against Atlas.)
 
@@ -100,7 +108,7 @@ Configure with `MONGO_URI` / `MONGO_DB` in `.env`. If Mongo is unreachable, the 
 | Key | Default | Meaning |
 |---|---|---|
 | `BOT_TOKEN` | — | From @BotFather (the only required credential) |
-| `POLL_INTERVAL` | `10` | Seconds between inbox checks |
+| `POLL_INTERVAL` | `5` | Seconds between inbox checks (all mails polled in parallel) |
 | `MONGO_URI` | *(empty → SQLite)* | MongoDB Atlas connection string |
 | `MONGO_DB` | `gmailotp` | Database name |
 

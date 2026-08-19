@@ -83,10 +83,10 @@ class Handler:
                                   reply_markup=kb.main_menu())
 
     # ------------------------------------------------------------------ #
-    def _generate(self, chat_id, user_id):
+    def _generate(self, chat_id, user_id, skip_cooldown=False):
         now = time.time()
         with _lock:
-            if now - _cooldown.get(user_id, 0) < GENERATE_COOLDOWN:
+            if not skip_cooldown and now - _cooldown.get(user_id, 0) < GENERATE_COOLDOWN:
                 self.api.send_message(chat_id, "⏳ One moment…", reply_markup=kb.main_menu())
                 return
             _cooldown[user_id] = now
@@ -113,19 +113,35 @@ class Handler:
             return
         plain = address.split("@")[0].replace(".", "") + "@" + address.split("@")[1]
 
+        # Baseline snapshot: this pooled inbox may contain OLD mail from a
+        # previous pool tenant. Mark everything that already exists as
+        # baseline so ONLY new mail (arriving after this moment) is delivered.
+        try:
+            old_ids = set()
+            for form in {address, plain}:
+                try:
+                    for m in self.emailnator.messages(form):
+                        if m.get("messageID"):
+                            old_ids.add(m["messageID"])
+                except Exception:
+                    pass
+            if old_ids:
+                db.mark_baseline(mail_id, old_ids)
+        except Exception as e:
+            log.warning("baseline snapshot failed for %s: %s", mail_id, e)
+
         if status_id:
             self.api.edit_message_text(
                 chat_id, status_id,
                 f"✅ <b>Your gmail is ready!</b>\n\n"
-                f"📧 <b>{esc(address)}</b>\n"
-                f"🔹 plain form: <code>{esc(plain)}</code>\n\n"
+                f"📧 <b>{esc(plain)}</b>\n\n"
                 f"Use it anywhere an OTP is needed — I'll forward every mail "
                 f"here instantly with HTML + raw files.",
                 parse_mode="HTML", reply_markup=kb.mail_actions(mail_id))
         else:
             self.api.send_message(
                 chat_id,
-                f"✅ <b>Your gmail is ready!</b>\n\n📧 <b>{esc(address)}</b>\n",
+                f"✅ <b>Your gmail is ready!</b>\n\n📧 <b>{esc(plain)}</b>\n",
                 parse_mode="HTML", reply_markup=kb.mail_actions(mail_id))
 
     # ------------------------------------------------------------------ #
@@ -137,7 +153,7 @@ class Handler:
                 "You don't have any mails yet.\nPress ➕ Generate Gmail to create one!",
                 reply_markup=kb.main_menu())
             return
-        body = "\n".join(f"{i+1}. <code>{esc(m['address'])}</code>" for i, m in enumerate(mails))
+        body = "\n".join(f"{i+1}. <code>{esc(m.get('plain_form') or m['address'])}</code>" for i, m in enumerate(mails))
         self.api.send_message(
             chat_id,
             f"📬 <b>Your mails</b>\n\n{body}\n\n[📥 Check] [🗑 Delete] per row",
@@ -188,6 +204,9 @@ class Handler:
                 chat_id, message_id, f"✅ Deleted <code>{esc(mail['address'])}</code>.",
                 parse_mode="HTML")
             self.api.answer_callback(cb_id, "Deleted")
+        elif data == "genmore":
+            self.api.answer_callback(cb_id, "Generating…")
+            self._generate(chat_id, user_id, skip_cooldown=True)
         elif data == "delno":
             self.api.edit_message_text(chat_id, message_id, "👍 Kept.")
             self.api.answer_callback(cb_id)
@@ -196,7 +215,7 @@ class Handler:
             page = int(data.split(":", 1)[1])
             mails = db.list_mails(user_id)
             if mails:
-                body = "\n".join(f"{i+1}. <code>{esc(m['address'])}</code>" for i, m in enumerate(mails))
+                body = "\n".join(f"{i+1}. <code>{esc(m.get('plain_form') or m['address'])}</code>" for i, m in enumerate(mails))
                 self.api.edit_message_text(
                     chat_id, message_id,
                     f"📬 <b>Your mails</b>\n\n{body}\n\n[📥 Check] [🗑 Delete] per row",
@@ -216,15 +235,17 @@ class Handler:
         except EmailnatorError as e:
             self.api.send_message(chat_id, f"⚠️ Inbox check failed: {esc(e)}")
             return
+        # hide pre-existing pool mail (baseline) from manual checks too
+        msgs = [m for m in msgs if not db.is_baseline(mail_id, m.get("messageID", ""))]
         if not msgs:
             self.api.send_message(
                 chat_id,
-                f"📭 <b>Inbox empty</b>\n{esc(mail['address'])}\n\n"
+                f"📭 <b>Inbox empty</b>\n{esc(mail.get('plain_form') or mail['address'])}\n\n"
                 f"Send something to this address and I'll forward it instantly.",
                 parse_mode="HTML")
             return
         self.api.send_message(
-            chat_id, f"📬 <b>{esc(mail['address'])}</b> — {len(msgs)} message(s):",
+            chat_id, f"📬 <b>{esc(mail.get('plain_form') or mail['address'])}</b> — {len(msgs)} message(s):",
             parse_mode="HTML")
         for m in msgs[:8]:
             codes = []
