@@ -230,11 +230,19 @@ class Handler:
             self.api.answer_callback(cb_id, "Not found", alert=True)
             return
         self.api.answer_callback(cb_id, "Checking…")
+        forms = {mail["address"]}
+        if mail.get("plain_form") and mail["plain_form"] != mail["address"]:
+            forms.add(mail["plain_form"])
+        msgs = {}
         try:
-            msgs = self.emailnator.messages(mail["address"])
+            for form in forms:
+                for m in self.emailnator.messages(form):
+                    if m.get("messageID"):
+                        msgs.setdefault(m["messageID"], m)
         except EmailnatorError as e:
             self.api.send_message(chat_id, f"⚠️ Inbox check failed: {esc(e)}")
             return
+        msgs = list(msgs.values())
         # hide pre-existing pool mail (baseline) from manual checks too
         msgs = [m for m in msgs if not db.is_baseline(mail_id, m.get("messageID", ""))]
         if not msgs:
