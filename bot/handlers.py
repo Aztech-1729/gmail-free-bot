@@ -258,7 +258,8 @@ class Handler:
         for m in msgs[:8]:
             codes = []
             try:
-                body = self.emailnator.message_body(mail["address"], m["messageID"])
+                body = self.emailnator.message_body(
+                    mail.get('plain_form') or mail['address'], m["messageID"])
                 codes = extract_codes(strip_tags(body))
             except Exception:
                 pass

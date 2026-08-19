@@ -103,15 +103,20 @@ class EmailnatorClient:
             data = r.json()
             msgs = data.get("messageData") or []
             self._update_tokens(s)
-            return [
-                {
+            out = []
+            for m in msgs:
+                # "ADSVPN" is a sponsored advert Emailnator injects into the
+                # pool — it has no real body (returns Server Error / JSON) and
+                # would be delivered to users as spam. Skip it.
+                if m.get("messageID") == "ADSVPN":
+                    continue
+                out.append({
                     "messageID": m.get("messageID"),
                     "from": m.get("from", ""),
                     "subject": m.get("subject", ""),
                     "time": m.get("time", ""),
-                }
-                for m in msgs
-            ]
+                })
+            return out
         except EmailnatorError:
             raise
         except Exception as e:
