@@ -99,12 +99,9 @@ class Mailer:
         recv_time = msg.get("time", "")
 
         try:
-            # Emailnator's body endpoint 500s on the dotted form but works on
-            # the plain form — Gmail treats both as the same inbox.
-            try:
-                body_html = self.emailnator.message_body(plain_form, message_id)
-            except EmailnatorError:
-                body_html = self.emailnator.message_body(dotted, message_id)
+            # Emailnator indexes bodies under the exact minted (dotted) form;
+            # message_body() tries dotted first, plain as fallback.
+            body_html = self.emailnator.message_body(dotted, message_id)
         except EmailnatorError as e:
             log.info("body fetch failed for %s: %s", message_id, e)
             body_html = ""

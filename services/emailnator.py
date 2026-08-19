@@ -124,23 +124,52 @@ class EmailnatorClient:
             raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
 
     def message_body(self, address: str, message_id: str, retries: int = 2) -> str:
-        """Fetch the full raw HTML of one message (retries on flaky 500s)."""
+        """Fetch the full raw HTML of one message.
+
+        Emailnator indexes messages under the exact minted (dotted) form, so we
+        try that first and fall back to the plain form. Responses that aren't
+        real HTML (JSON wrappers, empty, Server Error) are treated as failures
+        and retried on the other form.
+        """
+        forms = self._address_forms(address)
         last_err = None
         for attempt in range(retries + 1):
-            try:
-                s = self._ensure_session()
-                r = s.post(f"{BASE}/message-list",
-                           json={"email": address, "messageID": message_id},
-                           timeout=30)
-                if r.status_code == 200:
-                    self._update_tokens(s)
-                    if r.text and '"message": "Server Error"' not in r.text:
+            for form in forms:
+                try:
+                    s = self._ensure_session()
+                    r = s.post(f"{BASE}/message-list",
+                               json={"email": form, "messageID": message_id},
+                               timeout=30)
+                    if r.status_code == 200 and self._looks_like_body(r.text):
+                        self._update_tokens(s)
                         return r.text
-                    last_err = "emailnator server error for this message"
-                else:
-                    last_err = f"body HTTP {r.status_code}"
-            except Exception as e:
-                last_err = f"{type(e).__name__} {e}"
+                    last_err = (f"body HTTP {r.status_code}"
+                                if r.status_code != 200 else "non-HTML body")
+                except Exception as e:
+                    last_err = f"{type(e).__name__} {e}"
             self._reset_session()
             time.sleep(1.5)
         raise EmailnatorError(last_err or "body failed")
+
+    @staticmethod
+    def _address_forms(address: str) -> List[str]:
+        """The exact (dotted) address first, plain form as fallback."""
+        forms = [address]
+        try:
+            plain = address.split("@")[0].replace(".", "") + "@" + address.split("@")[1]
+            if plain != address:
+                forms.append(plain)
+        except Exception:
+            pass
+        return forms
+
+    @staticmethod
+    def _looks_like_body(text: str) -> bool:
+        if not text:
+            return False
+        stripped = text.lstrip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            return False
+        if '"message": "Server Error"' in text:
+            return False
+        return len(text) > 50 or "<" in text
