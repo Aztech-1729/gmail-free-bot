@@ -52,6 +52,14 @@ def mail_list_keyboard(mails, page=0, page_size=6):
     return {"inline_keyboard": rows}
 
 
+def join_channel_menu(channel_url):
+    """Inline buttons shown when the user must join the channel first."""
+    return {"inline_keyboard": [
+        [{"text": "🔗 Join Channel", "url": channel_url, "style": "primary"}],
+        [{"text": "✅ Verify", "callback_data": "verify", "style": "success"}],
+    ]}
+
+
 def confirm_delete(mail_id):
     return {"inline_keyboard": [
         [{"text": "✅ Yes, delete it", "callback_data": f"delok:{mail_id}", "style": "danger"}],

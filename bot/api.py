@@ -82,3 +82,6 @@ class BotAPI:
             p["text"] = text
         p["show_alert"] = alert
         return self._call("answerCallbackQuery", p)
+
+    def get_chat_member(self, chat_id, user_id):
+        return self._call("getChatMember", {"chat_id": chat_id, "user_id": user_id})

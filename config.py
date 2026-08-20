@@ -40,6 +40,12 @@ POLL_INTERVAL = _as_int(os.environ.get("POLL_INTERVAL") or ENV.get("POLL_INTERVA
 MONGO_URI = os.environ.get("MONGO_URI") or ENV.get("MONGO_URI", "")
 MONGO_DB = os.environ.get("MONGO_DB") or ENV.get("MONGO_DB", "gmailotp")
 
+# Channel users must join before using the bot (bot must be admin there)
+REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL") or ENV.get("REQUIRED_CHANNEL", "")
+REQUIRED_CHANNEL_URL = (os.environ.get("REQUIRED_CHANNEL_URL")
+                        or ENV.get("REQUIRED_CHANNEL_URL")
+                        or "https://t.me/aztechshub")
+
 # Per-user generate cooldown (seconds) — near-instant, still unlimited overall.
 GENERATE_COOLDOWN = 0.5
 

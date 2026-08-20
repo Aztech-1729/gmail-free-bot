@@ -4,7 +4,7 @@ import threading
 import time
 
 from bot import keyboards as kb
-from config import GENERATE_COOLDOWN
+from config import GENERATE_COOLDOWN, REQUIRED_CHANNEL, REQUIRED_CHANNEL_URL
 from services.emailnator import EmailnatorClient, EmailnatorError
 from services.extractor import esc, extract_codes, parse_headers, render_mail, strip_tags
 from storage.db import db
@@ -35,6 +35,13 @@ HELP = (
     "OTPs, not for permanent account recovery."
 )
 
+JOIN_MSG = (
+    "🔒 <b>Join our channel to use the bot</b>\n\n"
+    "You must be a member of the channel below before using GMAILS FREE:\n"
+    f"👉 {REQUIRED_CHANNEL_URL}\n\n"
+    "Press <b>Join Channel</b>, then <b>✅ Verify</b>."
+)
+
 _cooldown: dict = {}
 _lock = threading.Lock()
 
@@ -56,6 +63,28 @@ class Handler:
             log.exception("update handling failed: %s", e)
 
     # ------------------------------------------------------------------ #
+    def _is_member(self, user_id: int) -> bool:
+        """True when the user has joined the required channel (or none set)."""
+        if not REQUIRED_CHANNEL:
+            return True
+        try:
+            r = self.api.get_chat_member(REQUIRED_CHANNEL, user_id)
+            if r.get("ok"):
+                return r["result"].get("status", "") in (
+                    "member", "administrator", "creator")
+        except Exception:
+            pass
+        return False
+
+    def _require_member(self, chat_id: int, user_id: int) -> bool:
+        """Send the join prompt when not a member; returns True if allowed."""
+        if self._is_member(user_id):
+            return True
+        self.api.send_message(chat_id, JOIN_MSG, parse_mode="HTML",
+                              reply_markup=kb.join_channel_menu(REQUIRED_CHANNEL_URL))
+        return False
+
+    # ------------------------------------------------------------------ #
     def _handle_message(self, msg: dict):
         chat_id = msg["chat"]["id"]
         user_id = msg["from"]["id"]
@@ -63,6 +92,9 @@ class Handler:
         text = msg.get("text", "") or ""
 
         db.add_user(user_id, username)
+
+        if not self._require_member(chat_id, user_id):
+            return
 
         if text == "/start":
             self.api.send_message(chat_id, WELCOME, parse_mode="HTML",
@@ -166,9 +198,7 @@ class Handler:
             chat_id,
             f"📊 <b>Your stats</b>\n\n"
             f"📧 Mailboxes: <b>{n_mails}</b>\n"
-            f"📬 Messages delivered: <b>{n_delivered}</b>\n\n"
-            f"👥 Bot users: {db.user_count()}\n"
-            f"📧 Total mailboxes: {db.mail_count_total()}",
+            f"📬 Messages delivered: <b>{n_delivered}</b>",
             parse_mode="HTML", reply_markup=kb.main_menu())
 
     # ------------------------------------------------------------------ #
@@ -178,6 +208,16 @@ class Handler:
         user_id = cb["from"]["id"]
         chat_id = cb["message"]["chat"]["id"]
         message_id = cb["message"]["message_id"]
+
+        if data == "verify":
+            self._verify(chat_id, user_id, cb_id, message_id)
+            return
+        if not self._is_member(user_id):
+            self.api.answer_callback(cb_id, "🔒 Join the channel first", alert=True)
+            self.api.send_message(
+                chat_id, JOIN_MSG, parse_mode="HTML",
+                reply_markup=kb.join_channel_menu(REQUIRED_CHANNEL_URL))
+            return
 
         if data.startswith("check:"):
             self._check_inbox(chat_id, user_id, cb_id, data.split(":", 1)[1])
@@ -222,6 +262,20 @@ class Handler:
                     parse_mode="HTML", reply_markup=kb.mail_list_keyboard(mails, page))
         else:
             self.api.answer_callback(cb_id)
+
+    # ------------------------------------------------------------------ #
+    def _verify(self, chat_id, user_id, cb_id, message_id):
+        """Verify button — re-checks membership and unlocks the bot."""
+        if self._is_member(user_id):
+            self.api.answer_callback(cb_id, "✅ Verified! Enjoy the bot.")
+            self.api.edit_message_text(
+                chat_id, message_id, "✅ <b>Verified!</b> Use the buttons below.",
+                parse_mode="HTML")
+            self.api.send_message(chat_id, WELCOME, parse_mode="HTML",
+                                  reply_markup=kb.main_menu())
+        else:
+            self.api.answer_callback(cb_id, "❌ Not a member yet — join the channel first",
+                                     alert=True)
 
     # ------------------------------------------------------------------ #
     def _check_inbox(self, chat_id, user_id, cb_id, mail_id):
