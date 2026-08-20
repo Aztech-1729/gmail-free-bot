@@ -11,9 +11,9 @@ import tempfile
 import threading
 import time
 
-from bot.keyboards import mail_actions
 from services.emailnator import EmailnatorClient, EmailnatorError
-from services.extractor import build_eml, esc, extract_codes, safe_id, strip_tags
+from services.extractor import (esc, extract_codes, parse_headers, render_mail,
+                                safe_id, strip_tags)
 
 log = logging.getLogger("mailer")
 
@@ -105,45 +105,35 @@ class Mailer:
         except EmailnatorError as e:
             log.info("body fetch failed for %s: %s", message_id, e)
             body_html = ""
-        if not body_html or len(body_html) < 10:
-            body_html = (f"<html><body><p>From: {sender}</p>"
-                         f"<p>Subject: {subject}</p></body></html>")
+
+        # Prefer the precise headers from the raw body when available
+        headers = parse_headers(body_html) if body_html else {}
+        sender = headers.get("from") or sender
+        subject = headers.get("subject") or subject
+        recv_time = headers.get("time") or recv_time
 
         plain = strip_tags(body_html)
         codes = extract_codes(plain)
 
-        # 1) Send the files FIRST — the summary is only sent after BOTH
-        #    attachments succeeded, so a failure retries next poll without
-        #    spamming summary-only messages.
+        # 1) The FULL mail as a chat message: headers block + subject + body.
+        text = render_mail(show_addr, sender, subject, recv_time, plain, codes)
+        res_text = self.api.send_message(user_id, text, parse_mode="HTML")
+        if not res_text.get("ok"):
+            raise RuntimeError(f"text send failed: {res_text}")
+        text_message_id = res_text["result"]["message_id"]
+
+        # 2) Attach the .html as a REPLY to that message (drop the raw .eml).
         sid = safe_id(message_id)
         with tempfile.TemporaryDirectory() as td:
             html_path = os.path.join(td, f"{sid}.html")
-            eml_path = os.path.join(td, f"{sid}_raw.eml")
             with open(html_path, "w", encoding="utf-8") as f:
-                f.write(body_html)
-            with open(eml_path, "w", encoding="utf-8") as f:
-                f.write(build_eml(sender, dotted, subject, body_html))
-
-            res_html = self.api.send_document(user_id, html_path,
-                                              caption=f"🌐 <b>HTML file</b> — {esc(subject[:60])}",
-                                              parse_mode="HTML")
-            res_eml = self.api.send_document(user_id, eml_path,
-                                             caption=f"📄 <b>Raw .eml</b> — {esc(subject[:60])}",
-                                             parse_mode="HTML")
-            if not res_html.get("ok") or not res_eml.get("ok"):
-                raise RuntimeError(
-                    f"document send failed: html={res_html} eml={res_eml}")
-
-        # 2) Summary message (always arrives together with the files)
-        code_line = ""
-        if codes:
-            code_line = "\n\n🔑 <b>OTP CODES:</b> <code>" + "  ".join(codes[:4]) + "</code>"
-
-        self.api.send_message(
-            user_id,
-            f"📬 <b>New mail</b>\n"
-            f"📧 To: <code>{esc(show_addr)}</code>\n"
-            f"👤 From: {esc(sender)}\n"
-            f"✉️ Subject: {esc(subject)}\n"
-            f"🕐 {esc(recv_time)}{code_line}",
-            parse_mode="HTML", reply_markup=mail_actions(mail["id"]))
+                f.write(body_html or f"<html><body><p>From: {esc(sender)}</p>"
+                        f"<p>Subject: {esc(subject)}</p></body></html>")
+            res_html = self.api.send_document(
+                user_id, html_path,
+                caption=f"🌐 <b>HTML file</b> — {esc(subject[:60])}",
+                parse_mode="HTML", reply_to_message_id=text_message_id)
+            if not res_html.get("ok"):
+                # text already delivered — log, don't raise, so the mail is
+                # marked delivered and never re-sent as a duplicate
+                log.warning("html attach failed for %s: %s", message_id, res_html)

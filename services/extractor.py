@@ -56,3 +56,52 @@ def build_eml(from_: str, to: str, subject: str, body_html: str) -> str:
 def safe_id(message_id: str) -> str:
     """Sanitize a messageID for use in file names."""
     return re.sub(r"[^A-Za-z0-9_-]", "_", message_id or "msg")[:40]
+
+
+SEP = "➖➖➖➖➖➖➖➖➖"
+
+MAX_TEXT = 3200  # Telegram message limit is 4096 chars — leave room for headers
+
+
+def parse_headers(html_text: str) -> dict:
+    """Pull From / Subject / Time out of Emailnator's `subject-header` block."""
+    if not html_text:
+        return {}
+    m = re.search(r'<div id="subject-header">(.*?)</div>', html_text, re.S | re.I)
+    if not m:
+        return {}
+    block = m.group(1)
+    out = {}
+    for key, label in (("from", "From"), ("subject", "Subject"), ("time", "Time")):
+        mm = re.search(
+            r"<b>\s*" + label + r"\s*:\s*</b>(.*?)(?:<br\s*/?>|<div|</div>|<hr|$)",
+            block, re.S | re.I)
+        if mm:
+            out[key] = strip_tags(mm.group(1)).strip()
+    return out
+
+
+def render_mail(address: str, sender: str, subject: str, recv_time: str,
+                plain_body: str, codes: list) -> str:
+    """Full mail text for the chat: headers block, subject, then the body."""
+    code_line = ""
+    if codes:
+        code_line = ("\n🔑 <b>OTP:</b> <code>" + "  ".join(esc(c) for c in codes[:4])
+                     + "</code>")
+    body = (plain_body or "(no body)").strip()
+    truncated = False
+    if len(body) > MAX_TEXT:
+        body = body[:MAX_TEXT]
+        truncated = True
+    if truncated:
+        body += "\n\n… (truncated — full content in the attached HTML file)"
+    return (
+        SEP + "\n"
+        + f"<b>From:</b> {esc(sender)}\n"
+        + f"<b>To:</b> <code>{esc(address)}</code>\n"
+        + f"<b>Date:</b> {esc(recv_time)}{code_line}\n"
+        + SEP + "\n"
+        + f"<b>Subject:</b> {esc(subject)}\n"
+        + SEP + "\n"
+        + esc(body)
+    )

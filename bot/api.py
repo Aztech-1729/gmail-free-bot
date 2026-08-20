@@ -59,7 +59,8 @@ class BotAPI:
             p["reply_markup"] = reply_markup
         return self._call("editMessageText", p)
 
-    def send_document(self, chat_id, file_path, caption=None, parse_mode=None):
+    def send_document(self, chat_id, file_path, caption=None, parse_mode=None,
+                      reply_to_message_id=None):
         """Send a file as a document. Uses an explicit (filename, bytes) tuple
         so Telegram always receives the right name/extension."""
         import os as _os
@@ -68,6 +69,8 @@ class BotAPI:
             p["caption"] = caption
         if parse_mode:
             p["parse_mode"] = parse_mode
+        if reply_to_message_id:
+            p["reply_to_message_id"] = reply_to_message_id
         filename = _os.path.basename(file_path)
         with open(file_path, "rb") as f:
             content = f.read()

@@ -6,7 +6,7 @@ import time
 from bot import keyboards as kb
 from config import GENERATE_COOLDOWN
 from services.emailnator import EmailnatorClient, EmailnatorError
-from services.extractor import esc, extract_codes, strip_tags
+from services.extractor import esc, extract_codes, parse_headers, render_mail, strip_tags
 from storage.db import db
 
 log = logging.getLogger("handlers")
@@ -243,28 +243,36 @@ class Handler:
             self.api.send_message(chat_id, f"⚠️ Inbox check failed: {esc(e)}")
             return
         msgs = list(msgs.values())
-        # hide pre-existing pool mail (baseline) from manual checks too
-        msgs = [m for m in msgs if not db.is_baseline(mail_id, m.get("messageID", ""))]
+        # show ONLY new mail: skip pre-existing pool mail (baseline) and
+        # anything already delivered — so Check Inbox never repeats old mails
+        msgs = [m for m in msgs
+                if not db.is_baseline(mail_id, m.get("messageID", ""))
+                and not db.is_delivered(mail_id, m.get("messageID", ""))]
         if not msgs:
             self.api.send_message(
                 chat_id,
-                f"📭 <b>Inbox empty</b>\n{esc(mail['address'])}\n\n"
-                f"Send something to this address and I'll forward it instantly.",
+                f"📭 <b>No new mail</b>\n{esc(mail['address'])}\n\n"
+                f"Nothing new since your last check.",
                 parse_mode="HTML")
             return
         self.api.send_message(
-            chat_id, f"📬 <b>{esc(mail['address'])}</b> — {len(msgs)} message(s):",
+            chat_id, f"📬 <b>{esc(mail['address'])}</b> — {len(msgs)} new message(s):",
             parse_mode="HTML")
         for m in msgs[:8]:
             codes = []
+            body_html = ""
             try:
-                body = self.emailnator.message_body(mail["address"], m["messageID"])
-                codes = extract_codes(strip_tags(body))
+                body_html = self.emailnator.message_body(
+                    mail["address"], m["messageID"])
+                codes = extract_codes(strip_tags(body_html))
             except Exception:
                 pass
-            code_line = ("\n🔑 " + " ".join(f"<code>{c}</code>" for c in codes[:3])) if codes else ""
-            self.api.send_message(
-                chat_id,
-                f"👤 {esc(m.get('from', '?'))}\n✉️ {esc(m.get('subject', '(no subject)'))}\n"
-                f"🕐 {esc(m.get('time', ''))}{code_line}",
-                parse_mode="HTML")
+            headers = parse_headers(body_html) if body_html else {}
+            sender = headers.get("from") or m.get("from", "?")
+            subject = headers.get("subject") or m.get("subject", "(no subject)")
+            recv_time = headers.get("time") or m.get("time", "")
+            text = render_mail(mail["address"], sender, subject, recv_time,
+                               strip_tags(body_html), codes)
+            self.api.send_message(chat_id, text, parse_mode="HTML")
+            # mark as seen so it won't be repeated on the next Check Inbox
+            db.mark_delivered(mail_id, m.get("messageID", ""))
