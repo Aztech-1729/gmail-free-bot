@@ -68,10 +68,12 @@ class MongoStore:
             oid = ObjectId(mail_id)
         except Exception:
             return False
+        # Only remove the mail itself. Keep `delivered`/`baseline` rows: they
+        # are keyed by this mail_id and become harmless orphans, but if they
+        # were deleted here an in-flight poller round (which already holds this
+        # mail) would see every old message as undelivered and re-send it all
+        # in a burst.
         res = self._mails.delete_one({"_id": oid})
-        if res.deleted_count:
-            self._delivered.delete_many({"mail_id": mail_id})
-            self._baseline.delete_many({"mail_id": mail_id})
         return res.deleted_count > 0
 
     def count_mails(self, user_id):
@@ -175,8 +177,8 @@ class SqliteStore:
     def delete_mail(self, mail_id):
         with self._lock:
             cur = self.conn.execute("DELETE FROM mails WHERE id = ?", (mail_id,))
-            self.conn.execute("DELETE FROM delivered WHERE mail_id = ?", (mail_id,))
-            self.conn.execute("DELETE FROM baseline WHERE mail_id = ?", (mail_id,))
+            # keep delivered/baseline rows (orphans) to stop in-flight poller
+            # rounds from re-sending every old message on delete
             self.conn.commit()
             return cur.rowcount > 0
 

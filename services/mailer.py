@@ -55,6 +55,10 @@ class Mailer:
     # ------------------------------------------------------------------ #
     def _poll_mail(self, mail: dict):
         mail_id = mail["id"]
+        # skip if deleted while this round was in flight (prevents re-sending
+        # every old message as a burst right after the user deletes the mail)
+        if not self.db.get_mail(mail_id):
+            return
         forms = {mail["address"]}
         if mail.get("plain_form") and mail["plain_form"] != mail["address"]:
             forms.add(mail["plain_form"])
