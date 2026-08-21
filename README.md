@@ -144,15 +144,17 @@ Configure with `MONGO_URI` / `MONGO_DB` in `.env`. If Mongo is unreachable, the 
 - Web dashboard mirroring the DB
 - Dockerfile for one-command deploy (VPS/Railway)
 
-## ♾️ PRO ARSENAL — no rate limits (proxy-rotated, measured Aug 2026)
+## ♾️ PRO ARSENAL — @gmail.com ONLY, no rate limits (proxy-rotated, measured Aug 2026)
 
-The generation path now cascades across the full no-limit arsenal:
+**The bot mints ONLY real @gmail.com addresses** — other domains (SMailPro, temp
+mail, etc.) are removed: OTP senders block them anyway.
 
-| # | Provider | Gives | Speed | Limit → defeat |
-|---|---|---|---|---|
-| 1 | **Emailnator @gmail** (Playwright WAF bypass) | real @gmail.com | ~3.5s | ~250-300 gens/IP/15min → proxy rotation |
-| 2 | **SMailPro** (JWT-signer api.sonjj.com) | gmail-style domains | ~1.5-2.7s | ~12 creates/IP → proxies |
-| 3 | tempmail.lol v2 / Guerrilla / mail.tm / mail.gw | temp domains | 0.2-0.7s | keyless, generous |
+| Path | Gives | Speed | Limit → defeat |
+|---|---|---|---|
+| **Emailnator @gmail** (Playwright WAF bypass) | real @gmail.com | ~3.5s | ~250-300 gens/IP/15min → proxy rotation |
+| Legacy curl_cffi client (fallback) | real @gmail.com | ~1-2s | retries with backoff |
+
+Hard guard: any non-gmail address is discarded before it reaches the user.
 
 **Proxy pool** (`services/proxy_pool.py`): scrapes 20 sources → validates (anonymous
 check) → auto-refresh. Measured: 6,790 raw → 188 alive → 136 anon; refresh pass
@@ -172,6 +174,6 @@ proxy rotation, checkpoint resume (measured: 4.3/s sandbox, 3,227 uniques in one
 pip install -r requirements.txt
 playwright install chromium --with-deps   # for the @gmail.com WAF bypass
 ```
-If Playwright is missing, the bot degrades automatically: SMailPro → proxies →
-keyless providers (still unlimited, just not real-gmail domains).
+If Playwright is missing, generation fails with clear install instructions
+(gmail-only means no junk-domain fallbacks — fix chromium and you're back).
 

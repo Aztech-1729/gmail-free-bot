@@ -144,10 +144,10 @@ class Handler:
         except Exception:
             pass
 
-        # Cascade across the no-rate-limit provider arsenal:
-        #   Emailnator @gmail (Playwright WAF bypass) → SMailPro (proxies)
-        #   → tempmail.lol / Guerrilla / mail.gw / mail.tm
-        # Each provider rotates proxy IPs when a budget window burns.
+        # 🔒 GMAIL-ONLY generation — real @gmail.com, nothing else.
+        #   Path 1: Playwright WAF bypass (proxy-rotated, no effective limit)
+        #   Path 2: legacy curl_cffi client (also real @gmail.com)
+        #   Both paths are gmail-only; anything else is discarded.
         mail_id = None
         address = None
         provider = "emailnator"
@@ -156,9 +156,9 @@ class Handler:
             mailer = get_mailer()
             res = mailer.generate()
             address = res["address"]
-            provider = res["provider"]
         except Exception as e:
-            log.warning("arsenal generate failed: %s — falling back to legacy", e)
+            log.warning("gmail (waf-bypass) generate failed: %s — legacy fallback", e)
+        if not address:
             for attempt in range(10):
                 try:
                     address = self.emailnator.generate()
@@ -169,6 +169,9 @@ class Handler:
                     log.warning("legacy gen attempt %d: %s", attempt + 1, e2)
                 if attempt < 9:
                     time.sleep(min(2 ** attempt + 0.5, 8))
+        if address and "gmail.com" not in str(address):
+            log.warning("non-gmail address discarded: %s", address)
+            address = None
         if address:
             for attempt in range(5):
                 try:
@@ -180,7 +183,14 @@ class Handler:
         if not mail_id:
             # Non-fatal: try to inform user, but don't crash
             try:
-                self.api.send_message(chat_id, "⚠️ Generation failed.\nTry again in a moment.")
+                self.api.send_message(
+                    chat_id,
+                    "⚠️ <b>Generation failed.</b>\n\n"
+                    "🔧 Gmail-only mode needs Chromium on the server:\n"
+                    "<code>pip install playwright</code>\n"
+                    "<code>playwright install chromium --with-deps</code>\n\n"
+                    "Then restart the bot.",
+                    parse_mode="HTML")
             except Exception:
                 pass
             return
@@ -189,15 +199,26 @@ class Handler:
         # Baseline snapshot: this pooled inbox may contain OLD mail from a
         # previous pool tenant. Mark everything that already exists as
         # baseline so ONLY new mail (arriving after this moment) is delivered.
+        # Routed by provider: emailnator vs arsenal readers.
         try:
             old_ids = set()
-            for form in {address, plain}:
+            if provider != "emailnator":
                 try:
-                    for m in self.emailnator.messages(form):
+                    if mailer is None:
+                        mailer = get_mailer()
+                    for m in mailer.read_messages(address, provider):
                         if m.get("messageID"):
                             old_ids.add(m["messageID"])
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("arsenal baseline failed for %s: %s", address, e)
+            else:
+                for form in {address, plain}:
+                    try:
+                        for m in self.emailnator.messages(form):
+                            if m.get("messageID"):
+                                old_ids.add(m["messageID"])
+                    except Exception:
+                        pass
             if old_ids:
                 db.mark_baseline(mail_id, old_ids)
         except Exception as e:
@@ -241,10 +262,9 @@ class Handler:
         self.api.send_message(
             chat_id,
             f"♾️ <b>Mass generation started</b>\n\n"
-            f"• {n} addresses\n"
-            f"• cascade: @gmail.com (WAF bypass) → SMailPro (proxies) → keyless pool\n"
-            f"• proxy rotation = no rate limits\n\n"
-            f"⏳ Generating… this takes ~{max(5, n // 2)}s.",
+            f"• {n} × real @gmail.com\n"
+            f"• Playwright WAF bypass + proxy rotation = no rate limits\n\n"
+            f"⏳ Generating… roughly {max(5, n // 2)}s.",
             parse_mode="HTML")
 
         def run():
@@ -274,7 +294,7 @@ class Handler:
                         provider = "emailnator"
                     except Exception:
                         address = None
-                if address:
+                if address and "gmail.com" in str(address):
                     lines.append(address)
                     try:
                         db.add_mail(user_id, address, provider=provider)
@@ -434,18 +454,36 @@ class Handler:
             self.api.answer_callback(cb_id, "Not found", alert=True)
             return
         self.api.answer_callback(cb_id, "Checking…")
-        forms = {mail["address"]}
-        if mail.get("plain_form") and mail["plain_form"] != mail["address"]:
-            forms.add(mail["plain_form"])
+        provider = mail.get("provider") or "emailnator"
+        address = mail["address"]
         msgs = {}
-        try:
-            for form in forms:
-                for m in self.emailnator.messages(form):
+        if provider != "emailnator":
+            # ♾️ arsenal providers (SMailPro / mail.tm / gw / lol / guerrilla) —
+            # read via the unified provider router, bodies come embedded
+            try:
+                from services.unlimited_mail import get_mailer
+                for m in get_mailer().read_messages(address, provider):
                     if m.get("messageID"):
                         msgs.setdefault(m["messageID"], m)
-        except EmailnatorError as e:
-            self.api.send_message(chat_id, f"⚠️ Inbox check failed: {esc(e)}")
-            return
+            except Exception as e:
+                log.warning("arsenal check failed for %s (%s): %s",
+                            address, provider, e)
+                self.api.send_message(
+                    chat_id,
+                    f"⚠️ Inbox check failed ({provider}): {esc(str(e))[:120]}")
+                return
+        else:
+            forms = {address}
+            if mail.get("plain_form") and mail["plain_form"] != address:
+                forms.add(mail["plain_form"])
+            try:
+                for form in forms:
+                    for m in self.emailnator.messages(form):
+                        if m.get("messageID"):
+                            msgs.setdefault(m["messageID"], m)
+            except EmailnatorError as e:
+                self.api.send_message(chat_id, f"⚠️ Inbox check failed: {esc(e)}")
+                return
         msgs = list(msgs.values())
         # show ONLY new mail: skip pre-existing pool mail (baseline) and
         # anything already delivered — so Check Inbox never repeats old mails
@@ -455,28 +493,32 @@ class Handler:
         if not msgs:
             self.api.send_message(
                 chat_id,
-                f"📭 <b>No new mail</b>\n{esc(mail['address'])}\n\n"
+                f"📭 <b>No new mail</b>\n{esc(address)}\n\n"
                 f"Nothing new since your last check.",
                 parse_mode="HTML")
             return
         self.api.send_message(
-            chat_id, f"📬 <b>{esc(mail['address'])}</b> — {len(msgs)} new message(s):",
+            chat_id, f"📬 <b>{esc(address)}</b> — {len(msgs)} new message(s):",
             parse_mode="HTML")
         for m in msgs[:8]:
             codes = []
-            body_html = ""
-            try:
-                body_html = self.emailnator.message_body(
-                    mail["address"], m["messageID"])
-                codes = extract_codes(strip_tags(body_html))
-            except Exception:
-                pass
+            if provider != "emailnator":
+                # arsenal message: body already embedded in the payload
+                body_html = m.get("body") or ""
+            else:
+                body_html = ""
+                try:
+                    body_html = self.emailnator.message_body(
+                        address, m["messageID"])
+                except Exception:
+                    pass
+            plain = strip_tags(body_html) if body_html else ""
+            codes = extract_codes(plain) if plain else []
             headers = parse_headers(body_html) if body_html else {}
             sender = headers.get("from") or m.get("from", "?")
             subject = headers.get("subject") or m.get("subject", "(no subject)")
             recv_time = headers.get("time") or m.get("time", "")
-            text = render_mail(mail["address"], sender, subject, recv_time,
-                               strip_tags(body_html), codes)
+            text = render_mail(address, sender, subject, recv_time, plain, codes)
             self.api.send_message(chat_id, text, parse_mode="HTML")
             # mark as seen so it won't be repeated on the next Check Inbox
             db.mark_delivered(mail_id, m.get("messageID", ""))

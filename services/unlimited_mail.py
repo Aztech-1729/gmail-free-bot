@@ -1,34 +1,25 @@
-"""♾️ UNLIMITED MAIL — pro mail arsenal for GMAILS FREE (no rate limits).
+"""🔒 GMAIL-ONLY unlimited mail — real @gmail.com addresses, nothing else.
 
-Reverse-engineered & measured (Aug 2026). All providers keyless.
+Emailnator @gmail via Playwright WAF bypass (BotWafGuard). Proxy-rotated budget:
+Emailnator ≈ 250-300 generates/IP/15-min window × proxy pool = no effective limit.
 
-Cascade (generate):
-  1. EmailnatorGmail — REAL @gmail.com via Playwright WAF bypass
-     (BotWafGuard passed by headless Chromium; generate runs inside the
-     WAF-cleared page. ~3.5s/address. Budget ~250-300/IP/15min → proxy rotation)
-  2. SMailPro — gmail-style domains via JWT-signer proxy (api.sonjj.com),
-     ~1.5-2.7s/address, ~12 creates/IP → proxies
-  3. tempmail.lol v2 / Guerrilla / mail.tm / mail.gw — keyless temp domains,
-     fastest creates (0.2-0.7s), sender domains sometimes blocked
-OTP: Proton verification-code endpoint (keyless), per-IP throttle →
-     proxy rotation (measured: fresh proxies return 200 after direct 429).
+REMOVED (user request — other domains are useless for OTP anyway):
+  SMailPro / tempmail.lol / Guerrilla / mail.tm / mail.gw
+
+Also ships ProtonOTP — keyless 6-digit-code sender (proxy-rotated).
+
+Setup for the @gmail path:
+  pip install playwright
+  playwright install chromium --with-deps
 """
 import json
 import logging
 import threading
 import time
-import urllib.parse
 
 import requests
 
 from services.proxy_pool import ProxyPool
-
-try:
-    from curl_cffi import requests as cffi_requests
-    HAVE_CFFI = True
-except Exception:  # pragma: no cover
-    cffi_requests = None
-    HAVE_CFFI = False
 
 log = logging.getLogger("unlimitedmail")
 
@@ -45,9 +36,10 @@ GEN_JS = ("async () => { try { const r = await axios.post("
 class EmailnatorGmail:
     """REAL @gmail.com — BotWafGuard bypassed with headless Chromium.
 
-    Engine battle (measured): chromium WAF PASS + 543ms generate, 12/12 rapid;
-    lightpanda fast-load but flaky on the obfuscated challenge; firefox works too.
-    One persistent browser + lock; re-passes WAF automatically on expiry.
+    Engine battle (measured Aug 2026): chromium WAF PASS + ~543ms generate,
+    12/12 rapid, zero limits; lightpanda fast-load but flaky on the obfuscated
+    challenge; firefox works too.
+    One persistent browser + lock; re-passes WAF automatically.
     Optional proxy rotation per window budget (pool)."""
 
     name = 'emailnator'
@@ -72,8 +64,9 @@ class EmailnatorGmail:
         try:
             from playwright.sync_api import sync_playwright
         except Exception:
-            log.warning("playwright missing — emailnator disabled "
-                        "(pip install playwright && playwright install chromium)")
+            log.warning("playwright missing — @gmail generation disabled. "
+                        "Fix: pip install playwright && "
+                        "playwright install chromium --with-deps")
             return False
         try:
             self._pw = sync_playwright().start()
@@ -87,7 +80,8 @@ class EmailnatorGmail:
                           '--disable-dev-shm-usage', '--disable-gpu'])
             return True
         except Exception as e:
-            log.warning("browser launch failed: %s", e)
+            log.warning("browser launch failed: %s — chromium binaries missing? "
+                        "playwright install chromium --with-deps", e)
             return False
 
     def _new_context(self):
@@ -121,32 +115,21 @@ class EmailnatorGmail:
             return False
         if self._page is not None and self._gens < self.gens_per_proxy:
             return True
-        # rotate context (fresh proxy = fresh IP budget)
         if self._ctx:
             try:
                 self._ctx.close()
             except Exception:
                 pass
             self._ctx = self._page = None
-        try:
-            self._new_context()
-            if not self._waf_ready():
-                if self._proxy and self.pool:
-                    self.pool.punish(self._proxy)
-                return self._ensure_page_retry()
-            return True
-        except Exception as e:
-            log.warning("context setup failed: %s", e)
-            return False
-
-    def _ensure_page_retry(self):
-        for _ in range(3):
+        for _ in range(4):
             try:
                 self._new_context()
                 if self._waf_ready():
                     return True
             except Exception:
                 pass
+            if self._proxy and self.pool:
+                self.pool.punish(self._proxy)
         return False
 
     # ---------------------------------------------------------- public API
@@ -154,13 +137,13 @@ class EmailnatorGmail:
         """Mint a real @gmail.com address. Raises RuntimeError on failure."""
         with self._lock:
             if not self._ensure_page():
-                raise RuntimeError('emailnator browser unavailable (playwright missing?)')
+                raise RuntimeError('emailnator browser unavailable — install: '
+                                   'playwright install chromium --with-deps')
             self._gens += 1
             try:
                 out = self._page.evaluate(GEN_JS)
             except Exception:
-                # page died — force re-pass next time
-                self._ctx = self._page = None
+                self._ctx = self._page = None  # page died → re-pass next time
                 raise RuntimeError('emailnator page died')
             if out.startswith('ERR'):
                 if '419' in out or '429' in out:
@@ -174,14 +157,15 @@ class EmailnatorGmail:
                 e = e[0] if isinstance(e, list) else e
             except Exception:
                 raise RuntimeError('emailnator bad payload')
-            if not e or '@' not in str(e):
-                raise RuntimeError('emailnator empty address')
+            if not e or '@' not in str(e) or 'gmail.com' not in str(e):
+                # HARD GUARD: only real gmail/googlemail addresses leave here
+                raise RuntimeError(f'emailnator non-gmail address: {e}')
             if self._proxy and self.pool:
                 self.pool.credit(self._proxy)
             return str(e)
 
     def messages(self, email: str) -> list:
-        """List messages (same shape as old client: [{messageID, from, subject, time}])."""
+        """List messages [{messageID, from, subject, time}]."""
         with self._lock:
             if not self._ensure_page():
                 raise RuntimeError('emailnator browser unavailable')
@@ -205,9 +189,11 @@ class EmailnatorGmail:
                 raise RuntimeError('emailnator browser unavailable')
             out = self._page.evaluate(
                 "async (email, mid) => { try { const r = await axios.post("
-                "'https://www.emailnator.com/message-list', {email: email, messageID: mid});"
+                "'https://www.emailnator.com/message-list', "
+                "{email: email, messageID: mid});"
                 " return JSON.stringify(r.data); } catch(e) { return 'ERR ' + "
-                "(e.response ? e.response.status : e.message); } }", email, message_id)
+                "(e.response ? e.response.status : e.message); } }",
+                email, message_id)
             if out.startswith('ERR'):
                 raise RuntimeError(f'emailnator body blocked: {out[:60]}')
             return out
@@ -226,178 +212,6 @@ class EmailnatorGmail:
                 except Exception:
                     pass
             self._ctx = self._page = self._browser = self._pw = None
-
-
-# ================================================================ SMailPro
-class SMailPro:
-    """gmail-style temp domains via api.sonjj.com JWT-signer proxy (keyless).
-    Cracked flow: GET smailpro.com/app/payload?url=... → JWT → GET sonjj?...payload=JWT"""
-
-    name = 'smailpro'
-
-    def __init__(self, pool: ProxyPool = None):
-        self.pool = pool
-
-    def _sess(self, p):
-        if not HAVE_CFFI:
-            raise RuntimeError('curl_cffi missing')
-        kw = {'impersonate': 'chrome', 'timeout': 20}
-        if p:
-            kw['proxies'] = {'http': f'http://{p}', 'https': f'http://{p}'}
-        s = cffi_requests.Session(**kw)
-        s.get('https://smailpro.com/')
-        return s
-
-    def _signed(self, s, path, email=None):
-        params = {'url': f'https://api.sonjj.com/v1/temp_email{path}'}
-        if email:
-            params['email'] = email
-        q = urllib.parse.urlencode(params)
-        payload = s.get(f'https://smailpro.com/app/payload?{q}',
-                        headers={'Referer': 'https://smailpro.com/'}).text
-        return payload if payload and not payload.startswith('{') else None
-
-    def create(self):
-        p = self.pool.get() if self.pool else None
-        for _ in range(3):
-            try:
-                s = self._sess(p)
-                payload = self._signed(s, '/create')
-                if not payload:
-                    if p and self.pool:
-                        self.pool.punish(p)
-                    p = self.pool.get() if self.pool else None
-                    continue
-                r = s.get('https://api.sonjj.com/v1/temp_email/create?payload='
-                          + urllib.parse.quote(payload, safe=''),
-                          headers={'Accept': 'application/json',
-                                   'Referer': 'https://smailpro.com/'})
-                if r.status_code == 200 and r.json().get('email'):
-                    if p and self.pool:
-                        self.pool.credit(p)
-                    return {'address': r.json()['email'], 'provider': self.name,
-                            'session': s}
-                if r.status_code in (401, 429) and p and self.pool:
-                    self.pool.punish(p)
-                    p = self.pool.get() if self.pool else None
-            except Exception:
-                p = self.pool.get() if self.pool else None
-        return None
-
-    def read(self, inbox):
-        s = inbox.get('session')
-        if s is None:
-            return None
-        payload = self._signed(s, '/inbox', email=inbox['address'])
-        if not payload:
-            return None
-        r = s.get('https://api.sonjj.com/v1/temp_email/inbox?payload='
-                  + urllib.parse.quote(payload, safe=''),
-                  headers={'Accept': 'application/json',
-                           'Referer': 'https://smailpro.com/'})
-        if r.status_code != 200:
-            return None
-        return [{'messageID': m.get('mid'), 'from': (m.get('textFrom') or '').strip(),
-                 'subject': m.get('textSubject') or '', 'time': '',
-                 'body': m.get('text') or ''}
-                for m in r.json().get('messages', [])]
-
-
-# ================================================================ keyless
-class MailTM:
-    name = 'mailtm'
-    BASE = 'https://api.mail.tm'
-
-    def create(self):
-        try:
-            r = requests.get(f'{self.BASE}/domains', headers={'User-Agent': UA},
-                             timeout=12)
-            dom = r.json()['hydra:member'][0]['domain']
-            addr = f'u{int(time.time())}{threading.get_ident() % 1000}@{dom}'
-            r2 = requests.post(f'{self.BASE}/accounts',
-                               headers={'Content-Type': 'application/json',
-                                        'User-Agent': UA},
-                               json={'address': addr, 'password': 'UltraPass123!'},
-                               timeout=12)
-            if r2.status_code != 201:
-                return None
-            r3 = requests.post(f'{self.BASE}/token',
-                               headers={'Content-Type': 'application/json',
-                                        'User-Agent': UA},
-                               json={'address': addr, 'password': 'UltraPass123!'},
-                               timeout=12)
-            return {'address': addr, 'provider': self.name, 'token': r3.json()['token']}
-        except Exception:
-            return None
-
-    def read(self, inbox):
-        try:
-            r = requests.get(f'{self.BASE}/messages',
-                             headers={'Authorization': f'Bearer {inbox["token"]}',
-                                      'User-Agent': UA}, timeout=12)
-            return [{'messageID': m.get('id'), 'from': m.get('from', {}).get('address', ''),
-                     'subject': m.get('subject'), 'time': m.get('createdAt', ''),
-                     'body': m.get('intro', '')}
-                    for m in r.json().get('hydra:member', [])]
-        except Exception:
-            return None
-
-
-class MailGW(MailTM):
-    name = 'mailgw'
-    BASE = 'https://api.mail.gw'
-
-
-class TempMailLol:
-    name = 'lol'
-    BASE = 'https://api.tempmail.lol/v2'
-
-    def create(self):
-        try:
-            r = requests.post(f'{self.BASE}/inbox/create', headers={'User-Agent': UA},
-                              timeout=12)
-            j = r.json()
-            return {'address': j['address'], 'provider': self.name, 'token': j['token']}
-        except Exception:
-            return None
-
-    def read(self, inbox):
-        try:
-            r = requests.get(f'{self.BASE}/inbox?token={inbox["token"]}',
-                             headers={'User-Agent': UA}, timeout=12)
-            return [{'messageID': m.get('id'), 'from': m.get('from', {}).get('address', ''),
-                     'subject': m.get('subject'), 'time': m.get('created_at', ''),
-                     'body': m.get('body', '')}
-                    for m in r.json().get('emails', [])]
-        except Exception:
-            return None
-
-
-class Guerrilla:
-    name = 'guerrilla'
-
-    def create(self):
-        try:
-            r = requests.get('https://api.guerrillamail.com/ajax.php?f=get_email_address'
-                             '&ip=127.0.0.1&agent=Mozilla_foo',
-                             headers={'User-Agent': UA}, timeout=12)
-            j = r.json()
-            return {'address': j.get('email_addr'), 'provider': self.name,
-                    'sid_token': j.get('sid_token')}
-        except Exception:
-            return None
-
-    def read(self, inbox):
-        try:
-            r = requests.get('https://api.guerrillamail.com/ajax.php?f=fetch_email'
-                             f'&seq=0&sid_token={inbox["sid_token"]}',
-                             headers={'User-Agent': UA}, timeout=12)
-            return [{'messageID': m.get('mail_id'), 'from': m.get('mail_from'),
-                     'subject': m.get('mail_subject'), 'time': m.get('mail_timestamp', ''),
-                     'body': m.get('mail_excerpt', '')}
-                    for m in r.json().get('list', [])]
-        except Exception:
-            return None
 
 
 # ================================================================ OTP
@@ -419,7 +233,8 @@ class ProtonOTP:
                     'Content-Type': 'application/json',
                     'x-pm-appversion': 'Other',
                     'User-Agent': UA},
-                    json={'Type': 'email', 'Destination': {'Address': address}}, **kw)
+                    json={'Type': 'email', 'Destination': {'Address': address}},
+                    **kw)
                 if r.status_code == 200:
                     if p and pool:
                         pool.credit(p)
@@ -431,57 +246,31 @@ class ProtonOTP:
         return 0, 'all proxies failed'
 
 
-# ================================================================ cascade
+# ================================================================ mailer
 class UnlimitedMailer:
-    """One-stop generate/read across every provider, proxy-rotated."""
+    """GMAIL-ONLY generate/read. No other domains ever leave this class."""
 
     def __init__(self, pool: ProxyPool = None, use_emailnator: bool = True):
         self.pool = pool
         self.emailnator = EmailnatorGmail(pool) if use_emailnator else None
-        self.smailpro = SMailPro(pool) if HAVE_CFFI else None
-        self.lol = TempMailLol()
-        self.guerrilla = Guerrilla()
-        self.mailtm = MailTM()
-        self.mailgw = MailGW()
 
     def generate(self, prefer_gmail: bool = True) -> dict:
-        """Best-effort address across providers.
-        Returns {'address': str, 'provider': str, 'meta': dict}.
-        Raises RuntimeError when everything fails."""
-        errors = []
-        if prefer_gmail and self.emailnator is not None:
-            try:
-                addr = self.emailnator.generate()
-                return {'address': addr, 'provider': 'emailnator', 'meta': {}}
-            except Exception as e:
-                errors.append(f'emailnator: {e}')
-        if self.smailpro is not None:
-            for _ in range(3):
-                inbox = self.smailpro.create()
-                if inbox:
-                    return {'address': inbox['address'], 'provider': 'smailpro',
-                            'meta': {'session': inbox.get('session')}}
-                time.sleep(1)
-            errors.append('smailpro: all retries failed')
-        for prov in (self.lol, self.guerrilla, self.mailgw, self.mailtm):
-            inbox = prov.create()
-            if inbox:
-                return {'address': inbox['address'], 'provider': prov.name,
-                        'meta': {'token': inbox.get('token'),
-                                 'sid_token': inbox.get('sid_token')}}
-            errors.append(f'{prov.name}: failed')
-        raise RuntimeError('all providers failed: ' + '; '.join(errors[-3:]))
+        """{'address': '@gmail.com', 'provider': 'emailnator'}.
+        Raises RuntimeError with the fix instructions when Chromium is missing."""
+        if self.emailnator is None:
+            raise RuntimeError('gmail generation disabled — install playwright: '
+                               'pip install playwright && '
+                               'playwright install chromium --with-deps')
+        return {'address': self.emailnator.generate(),
+                'provider': 'emailnator', 'meta': {}}
 
-    def read_messages(self, address: str, provider: str) -> list:
-        """Unified read. Returns [] on failure (mailer treats as empty)."""
+    def read_messages(self, address: str, provider: str = 'emailnator') -> list:
+        if provider != 'emailnator' or self.emailnator is None:
+            return []  # legacy non-gmail entries are retired
         try:
-            if provider == 'emailnator' and self.emailnator is not None:
-                return self.emailnator.messages(address)
-            if provider == 'smailpro' and self.smailpro is not None:
-                return self.smailpro.read({'address': address, 'session': None})
+            return self.emailnator.messages(address)
         except Exception:
-            pass
-        return []
+            return []
 
     def read_body(self, address: str, provider: str, message_id: str) -> str:
         if provider == 'emailnator' and self.emailnator is not None:
