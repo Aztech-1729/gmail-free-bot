@@ -11,27 +11,12 @@ Performance improvements:
 - Circuit breaker for 5xx errors
 - Parallel body fetches with semaphore
 """
-import os
-import random
 import threading
 import time
 import urllib.parse
 from typing import List, Optional, Dict, Any
 
 from curl_cffi import requests as cffi_requests
-
-def _random_proxy() -> Optional[str]:
-    try:
-        p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "proxies_alive.txt")
-        if not os.path.exists(p):
-            p = "data/proxies_alive.txt"
-        with open(p) as f:
-            proxies = [l.strip() for l in f if l.strip()]
-            if proxies:
-                return random.choice(proxies)
-    except Exception:
-        pass
-    return None
 
 BASE = "https://www.emailnator.com"
 DEFAULT_TYPES = ["dotGmail"]
@@ -100,24 +85,8 @@ class EmailnatorClient:
                            "Chrome/126.0.0.0 Safari/537.36"),
             "X-Requested-With": "XMLHttpRequest",
         })
-        # try with random proxy if available (helps with Cloudflare 1015)
-        proxy = _random_proxy()
-        try:
-            if proxy:
-                s.get(BASE + "/", proxies={"http": proxy, "https": proxy}, timeout=15)
-            else:
-                s.get(BASE + "/")
-        except Exception:
-            try:
-                s.get(BASE + "/")
-            except Exception:
-                pass
+        s.get(BASE + "/", timeout=10)
         self._update_tokens(s)
-        # stash proxy for reuse
-        try:
-            s._proxy = proxy  # type: ignore
-        except Exception:
-            pass
         return s
 
     def _ensure_session(self):
@@ -170,9 +139,7 @@ class EmailnatorClient:
                 if not self._circuit.can_attempt():
                     raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
                 s = self._ensure_session()
-                proxy = getattr(s, "_proxy", None) or _random_proxy()
-                prox = {"http": proxy, "https": proxy} if proxy else None
-                r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30, proxies=prox)
+                r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
                 if r.status_code == 429:
                     time.sleep(0.5)
                     self._reset_session()
@@ -213,9 +180,7 @@ class EmailnatorClient:
                 if not self._circuit.can_attempt():
                     raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
                 s = self._ensure_session()
-                proxy = getattr(s, "_proxy", None) or _random_proxy()
-                prox = {"http": proxy, "https": proxy} if proxy else None
-                r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30, proxies=prox)
+                r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
                 if r.status_code == 429:
                     time.sleep(0.5)
                     self._reset_session()
@@ -305,11 +270,9 @@ class EmailnatorClient:
             for form in forms:
                 try:
                     s = self._ensure_session()
-                    proxy = getattr(s, "_proxy", None) or _random_proxy()
-                    prox = {"http": proxy, "https": proxy} if proxy else None
                     r = s.post(f"{BASE}/message-list",
                                json={"email": form, "messageID": message_id},
-                               timeout=30, proxies=prox)
+                               timeout=30)
                     if r.status_code == 429:
                         time.sleep(0.5)
                         self._reset_session()
