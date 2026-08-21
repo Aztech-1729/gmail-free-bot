@@ -143,3 +143,35 @@ Configure with `MONGO_URI` / `MONGO_DB` in `.env`. If Mongo is unreachable, the 
 - Auto-reply or forwarding of selected mails to another inbox
 - Web dashboard mirroring the DB
 - Dockerfile for one-command deploy (VPS/Railway)
+
+## ♾️ PRO ARSENAL — no rate limits (proxy-rotated, measured Aug 2026)
+
+The generation path now cascades across the full no-limit arsenal:
+
+| # | Provider | Gives | Speed | Limit → defeat |
+|---|---|---|---|---|
+| 1 | **Emailnator @gmail** (Playwright WAF bypass) | real @gmail.com | ~3.5s | ~250-300 gens/IP/15min → proxy rotation |
+| 2 | **SMailPro** (JWT-signer api.sonjj.com) | gmail-style domains | ~1.5-2.7s | ~12 creates/IP → proxies |
+| 3 | tempmail.lol v2 / Guerrilla / mail.tm / mail.gw | temp domains | 0.2-0.7s | keyless, generous |
+
+**Proxy pool** (`services/proxy_pool.py`): scrapes 20 sources → validates (anonymous
+check) → auto-refresh. Measured: 6,790 raw → 188 alive → 136 anon; refresh pass
+grew the pool 187 → 315. `python3 services/proxy_pool.py --loop` keeps it fed forever.
+
+**Bot commands**
+- `♾️ Mass Gmails` button or `/gmails N` — mint N addresses (up to 500), sent as a .txt
+- `/otp email` — keyless Proton verification-code mail (proxy-rotated)
+- `/proxies` — pool status
+
+**Mass generator (10k+)**: `python3 mass_gmail.py 10000 12` — 12 browser contexts,
+proxy rotation, checkpoint resume (measured: 4.3/s sandbox, 3,227 uniques in one run,
+99.2% unique). Output: `data/gmails.txt`.
+
+**Setup on a new machine**
+```bash
+pip install -r requirements.txt
+playwright install chromium --with-deps   # for the @gmail.com WAF bypass
+```
+If Playwright is missing, the bot degrades automatically: SMailPro → proxies →
+keyless providers (still unlimited, just not real-gmail domains).
+

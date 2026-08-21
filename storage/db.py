@@ -50,10 +50,10 @@ class MongoStore:
             {"$set": {"username": username or ""}, "$setOnInsert": {"joined_at": self._now()}},
             upsert=True)
 
-    def add_mail(self, user_id, address):
+    def add_mail(self, user_id, address, provider="emailnator"):
         plain = address.split("@")[0].replace(".", "") + "@" + address.split("@")[1]
         doc = {"user_id": user_id, "address": address, "plain_form": plain,
-               "created_at": self._now()}
+               "provider": provider, "created_at": self._now()}
         res = self._mails.insert_one(doc)
         return str(res.inserted_id)
 
@@ -145,7 +145,7 @@ class SqliteStore:
 
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, joined_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS mails (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, address TEXT NOT NULL UNIQUE, plain_form TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS mails (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, address TEXT NOT NULL UNIQUE, plain_form TEXT NOT NULL, provider TEXT DEFAULT 'emailnator', created_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS delivered (mail_id INTEGER NOT NULL, message_id TEXT NOT NULL, delivered_at TEXT DEFAULT (datetime('now')), PRIMARY KEY (mail_id, message_id));
     CREATE TABLE IF NOT EXISTS baseline (mail_id INTEGER NOT NULL, message_id TEXT NOT NULL, baselined_at TEXT DEFAULT (datetime('now')), PRIMARY KEY (mail_id, message_id));
     CREATE INDEX IF NOT EXISTS idx_mails_user ON mails(user_id);
@@ -164,10 +164,18 @@ class SqliteStore:
             self.conn.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username or ""))
             self.conn.commit()
 
-    def add_mail(self, user_id, address):
+    def add_mail(self, user_id, address, provider="emailnator"):
         plain = address.split("@")[0].replace(".", "") + "@" + address.split("@")[1]
         with self._lock:
-            cur = self.conn.execute("INSERT INTO mails (user_id, address, plain_form) VALUES (?, ?, ?)", (user_id, address, plain))
+            # migration for pre-arsenal DBs
+            try:
+                self.conn.execute("ALTER TABLE mails ADD COLUMN provider TEXT DEFAULT 'emailnator'")
+                self.conn.commit()
+            except Exception:
+                pass
+            cur = self.conn.execute(
+                "INSERT INTO mails (user_id, address, plain_form, provider) VALUES (?, ?, ?, ?)",
+                (user_id, address, plain, provider))
             self.conn.commit()
             return cur.lastrowid
 

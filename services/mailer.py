@@ -67,22 +67,35 @@ class Mailer:
         # every old message as a burst right after the user deletes the mail)
         if not self.db.get_mail(mail_id):
             return
+        provider = mail.get("provider") or "emailnator"
         forms = {mail["address"]}
         if mail.get("plain_form") and mail["plain_form"] != mail["address"]:
             forms.add(mail["plain_form"])
 
         messages = {}
 
-        def fetch_form(form):
+        if provider != "emailnator":
+            # ♾️ arsenal providers — unified reader (SMailPro / mail.tm / gw /
+            # tempmail.lol / guerrilla). Bodies come embedded in the message.
             try:
-                for m in self.emailnator.messages(form):
+                from services.unlimited_mail import get_mailer
+                for m in get_mailer().read_messages(mail["address"], provider):
                     if m.get("messageID"):
                         messages.setdefault(m["messageID"], m)
-            except EmailnatorError as e:
-                log.debug("list failed for %s: %s", form, e)
+            except Exception as e:
+                log.debug("arsenal list failed for %s (%s): %s",
+                          mail["address"], provider, e)
+        else:
+            def fetch_form(form):
+                try:
+                    for m in self.emailnator.messages(form):
+                        if m.get("messageID"):
+                            messages.setdefault(m["messageID"], m)
+                except EmailnatorError as e:
+                    log.debug("list failed for %s: %s", form, e)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=FORM_WORKERS) as ex:
-            list(ex.map(fetch_form, forms))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=FORM_WORKERS) as ex:
+                list(ex.map(fetch_form, forms))
 
         for message_id, msg in messages.items():
             if self.db.is_delivered(mail_id, message_id):
@@ -110,13 +123,18 @@ class Mailer:
         subject = msg.get("subject", "(no subject)")
         recv_time = msg.get("time", "")
 
-        try:
-            # Emailnator indexes bodies under the exact minted (dotted) form;
-            # message_body() tries dotted first, plain as fallback.
-            body_html = self.emailnator.message_body(dotted, message_id)
-        except EmailnatorError as e:
-            log.info("body fetch failed for %s: %s", message_id, e)
-            body_html = ""
+        provider = mail.get("provider") or "emailnator"
+        if provider != "emailnator":
+            # arsenal providers embed the body in the message payload
+            body_html = msg.get("body") or ""
+        else:
+            try:
+                # Emailnator indexes bodies under the exact minted (dotted) form;
+                # message_body() tries dotted first, plain as fallback.
+                body_html = self.emailnator.message_body(dotted, message_id)
+            except EmailnatorError as e:
+                log.info("body fetch failed for %s: %s", message_id, e)
+                body_html = ""
 
         # Prefer the precise headers from the raw body when available
         headers = parse_headers(body_html) if body_html else {}

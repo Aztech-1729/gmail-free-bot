@@ -7,6 +7,8 @@ from bot import keyboards as kb
 from config import GENERATE_COOLDOWN, REQUIRED_CHANNEL, REQUIRED_CHANNEL_URL
 from services.emailnator import EmailnatorClient, EmailnatorError
 from services.extractor import esc, extract_codes, parse_headers, render_mail, strip_tags
+from services.proxy_pool import ProxyPool
+from services.unlimited_mail import ProtonOTP, get_mailer
 from storage.db import db
 
 log = logging.getLogger("handlers")
@@ -44,6 +46,9 @@ JOIN_MSG = (
 
 _cooldown: dict = {}
 _lock = threading.Lock()
+_mass_jobs: dict = {}       # user_id -> {'done': int, 'total': int, 'running': bool}
+_otp_pool: ProxyPool = None
+_otp_pool_lock = threading.Lock()
 
 
 class Handler:
@@ -99,6 +104,14 @@ class Handler:
         if text == "/start":
             self.api.send_message(chat_id, WELCOME, parse_mode="HTML",
                                   reply_markup=kb.main_menu())
+        elif text.startswith("/gmails"):
+            self._mass_generate(chat_id, user_id, text)
+        elif text.startswith("/otp"):
+            self._send_otp(chat_id, user_id, text)
+        elif text.startswith("/proxies"):
+            self._proxy_status(chat_id)
+        elif text == "♾️ Mass Gmails":
+            self._mass_generate(chat_id, user_id, "/gmails 10")
         elif text == "➕ Generate Gmail":
             self._generate(chat_id, user_id)
         elif text == "📬 My Mails":
@@ -131,23 +144,39 @@ class Handler:
         except Exception:
             pass
 
-        # The pool occasionally hands out an address we already store
-        # (unique index) — regenerate up to 10 times with backoff.
+        # Cascade across the no-rate-limit provider arsenal:
+        #   Emailnator @gmail (Playwright WAF bypass) → SMailPro (proxies)
+        #   → tempmail.lol / Guerrilla / mail.gw / mail.tm
+        # Each provider rotates proxy IPs when a budget window burns.
         mail_id = None
         address = None
-        for attempt in range(10):
-            try:
-                address = self.emailnator.generate()
-                mail_id = db.add_mail(user_id, address)
-                break
-            except EmailnatorError as e:
-                log.warning("gen attempt %d: emailnator error: %s", attempt + 1, e)
-            except Exception as e:
-                log.warning("gen attempt %d: db/other error: %s", attempt + 1, e)
-            if attempt < 9:
-                # Exponential backoff with jitter for Cloudflare rate limits
-                delay = min(2 ** attempt + 0.5, 8)  # 1.5s, 2.5s, 4.5s, 8.5s...
-                time.sleep(delay)
+        provider = "emailnator"
+        mailer = None
+        try:
+            mailer = get_mailer()
+            res = mailer.generate()
+            address = res["address"]
+            provider = res["provider"]
+        except Exception as e:
+            log.warning("arsenal generate failed: %s — falling back to legacy", e)
+            for attempt in range(10):
+                try:
+                    address = self.emailnator.generate()
+                    break
+                except EmailnatorError as e2:
+                    log.warning("legacy gen attempt %d: %s", attempt + 1, e2)
+                except Exception as e2:
+                    log.warning("legacy gen attempt %d: %s", attempt + 1, e2)
+                if attempt < 9:
+                    time.sleep(min(2 ** attempt + 0.5, 8))
+        if address:
+            for attempt in range(5):
+                try:
+                    mail_id = db.add_mail(user_id, address, provider=provider)
+                    break
+                except Exception as e:
+                    log.warning("db add attempt %d: %s", attempt + 1, e)
+                    time.sleep(1.5)
         if not mail_id:
             # Non-fatal: try to inform user, but don't crash
             try:
@@ -194,6 +223,110 @@ class Handler:
                 log.warning("failed to send success msg to %s: %s", user_id, e)
 
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # ♾️ PRO COMMANDS — mass generate · OTP sender · proxy status
+    # ------------------------------------------------------------------ #
+    def _mass_generate(self, chat_id, user_id, text):
+        """`/gmails N` — mint N addresses via the no-rate-limit arsenal."""
+        parts = text.split()
+        n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
+        n = max(1, min(n, 500))
+        with _lock:
+            job = _mass_jobs.get(user_id)
+            if job and job["running"]:
+                self.api.send_message(
+                    chat_id, f"⏳ Mass job already running: {job['done']}/{job['total']}")
+                return
+            _mass_jobs[user_id] = {"done": 0, "total": n, "running": True}
+        self.api.send_message(
+            chat_id,
+            f"♾️ <b>Mass generation started</b>\n\n"
+            f"• {n} addresses\n"
+            f"• cascade: @gmail.com (WAF bypass) → SMailPro (proxies) → keyless pool\n"
+            f"• proxy rotation = no rate limits\n\n"
+            f"⏳ Generating… this takes ~{max(5, n // 2)}s.",
+            parse_mode="HTML")
+
+        def run():
+            import io
+            import time as _t
+            mailer = None
+            try:
+                mailer = get_mailer()
+            except Exception:
+                pass
+            lines = []
+            job = _mass_jobs.get(user_id, {})
+            total = job.get("total", n)
+            for i in range(total):
+                address = None
+                provider = "emailnator"
+                if mailer is not None:
+                    try:
+                        res = mailer.generate()
+                        address = res["address"]
+                        provider = res["provider"]
+                    except Exception:
+                        pass
+                if address is None:
+                    try:
+                        address = self.emailnator.generate()
+                        provider = "emailnator"
+                    except Exception:
+                        address = None
+                if address:
+                    lines.append(address)
+                    try:
+                        db.add_mail(user_id, address, provider=provider)
+                    except Exception:
+                        pass
+                with _lock:
+                    _mass_jobs[user_id] = {"done": i + 1, "total": total, "running": True}
+                _t.sleep(0.3)
+            with _lock:
+                _mass_jobs[user_id]["running"] = False
+            buf = io.BytesIO(("\n".join(lines) + "\n").encode())
+            self.api.send_document(
+                chat_id, buf, filename=f"gmails_{len(lines)}.txt",
+                caption=f"♾️ <b>Mass done:</b> {len(lines)}/{total} addresses\n\n"
+                        "Send each to any site — mails land in <b>My Mails</b>.",
+                parse_mode="HTML")
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _send_otp(self, chat_id, user_id, text):
+        """`/otp email` — keyless Proton verification-code mail (proxy-rotated)."""
+        global _otp_pool
+        parts = text.split()
+        if len(parts) < 2 or "@" not in parts[1]:
+            self.api.send_message(chat_id, "Usage: /otp email@domain.com")
+            return
+        address = parts[1]
+        with _otp_pool_lock:
+            if _otp_pool is None:
+                _otp_pool = ProxyPool()
+        self.api.send_message(chat_id, f"📤 Sending OTP code mail to {address}…")
+        status, body = ProtonOTP().send(address, _otp_pool)
+        if status == 200:
+            self.api.send_message(
+                chat_id, f"✅ <b>OTP mail sent</b> to {address}\n\n"
+                         "Proton verification code (6 digits) — check inbox/spam.",
+                parse_mode="HTML")
+        else:
+            self.api.send_message(
+                chat_id, f"⚠️ OTP send failed ({status})\n{body[:100]}")
+
+    def _proxy_status(self, chat_id):
+        pool = ProxyPool()
+        self.api.send_message(
+            chat_id,
+            f"♾️ <b>Proxy pool</b>\n\n"
+            f"• pool size: {pool.size()}\n"
+            f"• budget: 40 uses/proxy, 15-min cooldown\n"
+            f"• refresh: python3 services/proxy_pool.py --loop\n\n"
+            f"Emailnator ≈ 250-300 gens/IP/window × pool = no effective limit.",
+            parse_mode="HTML")
+
     def _show_mail_list(self, chat_id, user_id, page=0):
         mails = db.list_mails(user_id)
         if not mails:
