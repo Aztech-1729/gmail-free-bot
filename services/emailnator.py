@@ -128,31 +128,40 @@ class EmailnatorClient:
     def generate(self, types: Optional[List[str]] = None) -> str:
         """Mint one gmail. Returns the address (dotted form as minted)."""
         types = types or DEFAULT_TYPES
-        if not self._circuit.can_attempt():
-            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
-        try:
-            s = self._ensure_session()
-            r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
-            if r.status_code != 200:
-                self._circuit.record_failure(r.status_code)
+        for attempt in range(8):
+            try:
+                if not self._circuit.can_attempt():
+                    raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
+                s = self._ensure_session()
+                r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
+                if r.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    self._reset_session()
+                    continue
                 if r.status_code == 419:
-                    self._reset_session()  # CSRF token mismatch - reset session
-                raise EmailnatorError(f"generate HTTP {r.status_code}: {r.text[:120]}")
-            self._circuit.record_success()
-            data = r.json()
-            addrs = data.get("email") or []
-            if not addrs:
-                raise EmailnatorError("empty response from generate-email")
-            addr = addrs[0]
-            if "+" in addr:
-                raise EmailnatorError("got a + alias — retry")
-            self._update_tokens(s)
-            return addr
-        except EmailnatorError:
-            raise
-        except Exception as e:
-            self._reset_session()
-            raise EmailnatorError(f"generate failed: {type(e).__name__} {e}")
+                    self._reset_session()
+                    continue
+                if r.status_code != 200:
+                    self._circuit.record_failure(r.status_code)
+                    raise EmailnatorError(f"generate HTTP {r.status_code}: {r.text[:120]}")
+                self._circuit.record_success()
+                data = r.json()
+                addrs = data.get("email") or []
+                if not addrs:
+                    raise EmailnatorError("empty response from generate-email")
+                addr = addrs[0]
+                if "+" in addr:
+                    raise EmailnatorError("got a + alias — retry")
+                self._update_tokens(s)
+                return addr
+            except EmailnatorError:
+                raise
+            except Exception as e:
+                self._reset_session()
+                if attempt == 7:
+                    raise EmailnatorError(f"generate failed: {type(e).__name__} {e}")
+                time.sleep(2 ** attempt)
+        raise EmailnatorError("generate failed after retries")
 
     def messages(self, address: str) -> List[dict]:
         """List inbox messages for an exact address string."""
