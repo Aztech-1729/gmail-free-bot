@@ -188,7 +188,7 @@ class Handler:
         mail_id = None
         address = None
         provider = "emailnator"
-        for attempt in range(10):
+        for attempt in range(3):
             try:
                 address = self.emailnator.generate()
                 break
@@ -196,8 +196,8 @@ class Handler:
                 log.warning("gen attempt %d: %s", attempt + 1, e2)
             except Exception as e2:
                 log.warning("gen attempt %d: %s", attempt + 1, e2)
-            if attempt < 9:
-                time.sleep(min(2 ** attempt + 0.5, 8))
+            if attempt < 2:
+                time.sleep(1)
         if not address:
             try:
                 res = get_mailer().generate()
