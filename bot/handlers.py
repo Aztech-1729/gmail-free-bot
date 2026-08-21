@@ -1,5 +1,9 @@
 """Update handlers — fully button-driven Bot API flows."""
+import json
 import logging
+import os
+import re
+import tempfile
 import threading
 import time
 
@@ -9,6 +13,7 @@ from services.emailnator import EmailnatorClient, EmailnatorError
 from services.extractor import esc, extract_codes, parse_headers, render_mail, strip_tags
 from services.proxy_pool import ProxyPool
 from services.unlimited_mail import ProtonOTP, get_mailer
+from services.x_signup import XSignupError, initiate_signup, verify_otp_and_create
 from storage.db import db
 
 log = logging.getLogger("handlers")
@@ -29,6 +34,7 @@ HELP = (
     "➕ <b>Generate Gmail</b> — mint a fresh @gmail.com address.\n"
     "📥 <b>Check Inbox</b> — read mail for any address manually.\n"
     "🗑 <b>Delete Mail</b> — remove an address (mail stops being polled).\n"
+    "🔐 <b>Create X Acc</b> — send <code>/createx jak.sen.d.a.n.m.ar.k@gmail.com</code> → I signup on X, poll OTP, DM you OTP, reply OTP → I save session file.\n"
     "📊 <b>Stats</b> — your totals.\n\n"
     "1️⃣ Press <b>Generate</b>, copy the address.\n"
     "2️⃣ Use it on any site / app that sends an OTP.\n"
@@ -49,6 +55,8 @@ _lock = threading.Lock()
 _mass_jobs: dict = {}       # user_id -> {'done': int, 'total': int, 'running': bool}
 _otp_pool: ProxyPool = None
 _otp_pool_lock = threading.Lock()
+_x_pending: dict = {}       # user_id -> XSignupSession (awaiting OTP)
+_x_pending_lock = threading.Lock()
 
 
 class Handler:
@@ -103,7 +111,7 @@ class Handler:
 
         if text == "/start":
             self.api.send_message(chat_id, WELCOME, parse_mode="HTML",
-                                  reply_markup=kb.main_menu())
+                                   reply_markup=kb.main_menu())
         elif text.startswith("/gmails"):
             self._mass_generate(chat_id, user_id, text)
         elif text.startswith("/otp"):
@@ -112,6 +120,28 @@ class Handler:
             self._proxy_status(chat_id)
         elif text == "♾️ Mass Gmails":
             self._mass_generate(chat_id, user_id, "/gmails 10")
+        elif text == "🔐 Create X Acc" or text.startswith("/createx"):
+            # /createx jak.sen.d.a.n.m.ar.k@gmail.com
+            parts = text.split()
+            email = parts[1] if len(parts) > 1 else ""
+            if email and "@" in email:
+                self._x_create(chat_id, user_id, email.strip())
+            else:
+                self.api.send_message(chat_id,
+                    "🔐 <b>Create X Account</b>\n\nSend your dotted gmail:\n<code>/createx jak.sen.d.a.n.m.ar.k@gmail.com</code>\n\n"
+                    "I'll signup on X, X will email OTP to that gmail, I'll DM you the OTP → reply with the OTP to finish and get your session file.",
+                    parse_mode="HTML")
+        elif re.fullmatch(r"\d{4,8}", text.strip()):
+            # 4-8 digit OTP reply for pending X signup
+            with _x_pending_lock:
+                pending = _x_pending.get(user_id)
+            if pending:
+                self._x_verify(chat_id, user_id, text.strip())
+                return
+            self.api.send_message(chat_id, "Use the buttons below ⬇️", reply_markup=kb.main_menu())
+        elif "@gmail.com" in text.lower() and len(text.strip().split()) == 1:
+            # bare dotted gmail sent — treat as /createx <gmail>
+            self._x_create(chat_id, user_id, text.strip())
         elif text == "➕ Generate Gmail":
             self._generate(chat_id, user_id)
         elif text == "📬 My Mails":
@@ -122,10 +152,10 @@ class Handler:
             self._stats(chat_id, user_id)
         elif text == "❓ Help":
             self.api.send_message(chat_id, HELP, parse_mode="HTML",
-                                  reply_markup=kb.main_menu())
+                                   reply_markup=kb.main_menu())
         else:
             self.api.send_message(chat_id, "Use the buttons below ⬇️",
-                                  reply_markup=kb.main_menu())
+                                   reply_markup=kb.main_menu())
 
     # ------------------------------------------------------------------ #
     def _generate(self, chat_id, user_id, skip_cooldown=False):
@@ -346,6 +376,67 @@ class Handler:
             f"• refresh: python3 services/proxy_pool.py --loop\n\n"
             f"Emailnator ≈ 250-300 gens/IP/window × pool = no effective limit.",
             parse_mode="HTML")
+
+    def _x_create(self, chat_id, user_id, email: str):
+        email = email.strip()
+        if not re.fullmatch(r"[^@\s]+@gmail\.com", email, re.I):
+            self.api.send_message(chat_id, "❌ Send a valid <code>@gmail.com</code> (dotted allowed), e.g. <code>jak.sen.d.a.n.m.ar.k@gmail.com</code>", parse_mode="HTML")
+            return
+        # ensure we track this gmail in My Mails so OTP poller catches it
+        try:
+            db.add_mail(user_id, email)
+        except Exception:
+            pass
+        self.api.send_message(chat_id, f"🔐 <b>X signup started</b>\n\n📧 <code>{esc(email)}</code>\n👤 Handle: generating…\n\nTriggering X to send OTP — watch this chat for the code.", parse_mode="HTML")
+        def run():
+            try:
+                sess = initiate_signup(email)
+                with _x_pending_lock:
+                    _x_pending[user_id] = sess
+                self.api.send_message(chat_id,
+                    f"✅ X init OK\n\n📧 <code>{esc(email)}</code>\n👤 <b>@{esc(sess.handle)}</b>\n🔑 <code>{esc(sess.password)}</code>\n\n"
+                    f"X should email OTP to that gmail now. I'll also DM you the OTP when it lands. "
+                    f"Reply with the <b>6-digit OTP</b> (e.g. <code>123456</code>) to finish and get your session file.",
+                    parse_mode="HTML")
+            except XSignupError as e:
+                self.api.send_message(chat_id, f"❌ X init failed: {esc(str(e))}", parse_mode="HTML")
+            except Exception as e:
+                self.api.send_message(chat_id, f"❌ X init error: {esc(str(e)[:200])}", parse_mode="HTML")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _x_verify(self, chat_id, user_id, otp: str):
+        with _x_pending_lock:
+            sess = _x_pending.get(user_id)
+        if not sess:
+            self.api.send_message(chat_id, "❌ No pending X signup. Send <code>/createx your@gmail.com</code> first.", parse_mode="HTML")
+            return
+        self.api.send_message(chat_id, f"⏳ Verifying OTP <code>{esc(otp)}</code> for <b>@{esc(sess.handle)}</b>…", parse_mode="HTML")
+        def run():
+            try:
+                result = verify_otp_and_create(sess, otp)
+                # save session file
+                data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "sessions")
+                os.makedirs(data_dir, exist_ok=True)
+                fname = f"{result['handle']}_{int(time.time())}.json"
+                fpath = os.path.join(data_dir, fname)
+                with open(fpath, "w", encoding="utf-8") as f:
+                    json.dump(result["cookies"], f, indent=2)
+                # send file
+                with open(fpath, "rb") as f:
+                    self.api.send_document(chat_id, f, filename=fname, caption=(
+                        f"✅ <b>X account created!</b>\n\n"
+                        f"📧 {esc(result['email'])}\n"
+                        f"👤 <b>@{esc(result['handle'])}</b> — {esc(result['name'])}\n"
+                        f"🔑 <code>{esc(result['password'])}</code>\n\n"
+                        f"Session file attached — same shape as <code>session1.json</code>. Drop it into your scraper as <code>session1.json</code> or keep as backup."
+                    ), parse_mode="HTML")
+                with _x_pending_lock:
+                    _x_pending.pop(user_id, None)
+            except XSignupError as e:
+                self.api.send_message(chat_id, f"❌ OTP verify failed: {esc(str(e))}\n\nTry again — reply with correct OTP.", parse_mode="HTML")
+            except Exception as e:
+                self.api.send_message(chat_id, f"❌ Verify error: {esc(str(e)[:200])}", parse_mode="HTML")
+        threading.Thread(target=run, daemon=True).start()
 
     def _show_mail_list(self, chat_id, user_id, page=0):
         mails = db.list_mails(user_id)

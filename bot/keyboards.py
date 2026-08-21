@@ -18,6 +18,7 @@ def main_menu():
             [_btn("➕ Generate Gmail", "primary")],
             [_btn("📬 My Mails", "success"), _btn("🗑 Delete Mail", "danger")],
             [_btn("♾️ Mass Gmails", "success")],
+            [_btn("🔐 Create X Acc", "primary")],
             [_btn("📊 Stats"), _btn("❓ Help")],
         ],
         "resize_keyboard": True,
