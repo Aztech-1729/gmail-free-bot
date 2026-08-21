@@ -59,10 +59,12 @@ class BotAPI:
             p["reply_markup"] = reply_markup
         return self._call("editMessageText", p)
 
-    def send_document(self, chat_id, file_path, caption=None, parse_mode=None,
-                      reply_to_message_id=None):
-        """Send a file as a document. Uses an explicit (filename, bytes) tuple
-        so Telegram always receives the right name/extension."""
+    def send_document(self, chat_id, file_obj, caption=None, parse_mode=None,
+                      reply_to_message_id=None, filename=None):
+        """Send a file as a document.
+        Accepts either a file path (str) or a file-like object (BytesIO).
+        If file_obj is a path, filename defaults to its basename.
+        If file_obj is a BytesIO, filename must be provided."""
         import os as _os
         p = {"chat_id": chat_id}
         if caption:
@@ -71,9 +73,19 @@ class BotAPI:
             p["parse_mode"] = parse_mode
         if reply_to_message_id:
             p["reply_to_message_id"] = reply_to_message_id
-        filename = _os.path.basename(file_path)
-        with open(file_path, "rb") as f:
-            content = f.read()
+
+        if isinstance(file_obj, str):
+            # path
+            filename = filename or _os.path.basename(file_obj)
+            with open(file_obj, "rb") as f:
+                content = f.read()
+        else:
+            # file-like (BytesIO)
+            if not filename:
+                raise ValueError("filename required when file_obj is not a path")
+            file_obj.seek(0)
+            content = file_obj.read()
+
         return self._call("sendDocument", p, files={"document": (filename, content)})
 
     def answer_callback(self, callback_query_id, text=None, alert=False):

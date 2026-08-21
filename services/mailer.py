@@ -2,14 +2,13 @@
 
 Polls ALL registered addresses concurrently (worker pool + per-thread
 Emailnator sessions), both address forms each. New mail → instantly sends
-the user: summary with OTP codes, .html file, raw .eml file.
+the user: summary with OTP codes, .html file (no raw .eml).
 """
 import concurrent.futures
 import logging
-import os
-import tempfile
 import threading
 import time
+from io import BytesIO
 
 from services.emailnator import EmailnatorClient, EmailnatorError
 from services.extractor import (esc, extract_codes, parse_headers, render_mail,
@@ -128,16 +127,14 @@ class Mailer:
 
         # 2) Attach the .html as a REPLY to that message (drop the raw .eml).
         sid = safe_id(message_id)
-        with tempfile.TemporaryDirectory() as td:
-            html_path = os.path.join(td, f"{sid}.html")
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(body_html or f"<html><body><p>From: {esc(sender)}</p>"
-                        f"<p>Subject: {esc(subject)}</p></body></html>")
-            res_html = self.api.send_document(
-                user_id, html_path,
-                caption=f"🌐 <b>HTML file</b> — {esc(subject[:60])}",
-                parse_mode="HTML", reply_to_message_id=text_message_id)
-            if not res_html.get("ok"):
-                # text already delivered — log, don't raise, so the mail is
-                # marked delivered and never re-sent as a duplicate
-                log.warning("html attach failed for %s: %s", message_id, res_html)
+        html_bytes = (body_html or f"<html><body><p>From: {esc(sender)}</p>"
+                        f"<p>Subject: {esc(subject)}</p></body></html>").encode("utf-8")
+        res_html = self.api.send_document(
+            user_id, BytesIO(html_bytes),
+            filename=f"{sid}.html",
+            caption=f"🌐 <b>HTML file</b> — {esc(subject[:60])}",
+            parse_mode="HTML", reply_to_message_id=text_message_id)
+        if not res_html.get("ok"):
+            # text already delivered — log, don't raise, so the mail is
+            # marked delivered and never re-sent as a duplicate
+            log.warning("html attach failed for %s: %s", message_id, res_html)
