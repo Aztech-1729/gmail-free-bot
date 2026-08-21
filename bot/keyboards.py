@@ -17,7 +17,7 @@ def main_menu():
         "keyboard": [
             [_btn("➕ Generate Gmail", "primary")],
             [_btn("📬 My Mails", "success"), _btn("🗑 Delete Mail", "danger")],
-            [_btn("♾️ Mass Gmails", "success")],
+            [_btn("♾️ Mass Gmails", "success"), _btn("🗑 Delete All", "danger")],
             [_btn("🔐 Create X Acc", "primary")],
             [_btn("📊 Stats"), _btn("❓ Help")],
         ],
@@ -59,6 +59,15 @@ def join_channel_menu(channel_url):
     return {"inline_keyboard": [
         [{"text": "🔗 Join Channel", "url": channel_url, "style": "primary"}],
         [{"text": "✅ Verify", "callback_data": "verify", "style": "success"}],
+    ]}
+
+
+def confirm_delete_all(count):
+    """Inline confirm for wiping every mail of a user."""
+    return {"inline_keyboard": [
+        [{"text": f"⚠️ Yes, delete ALL {count}", "callback_data": "delall:yes",
+          "style": "danger"}],
+        [{"text": "❌ Cancel", "callback_data": "delall:no", "style": "success"}],
     ]}
 
 

@@ -68,6 +68,12 @@ class MongoStore:
             return None
         return self._shape(m) if m else None
 
+    def delete_all_mails(self, user_id):
+        """Remove every mail of a user. Delivered/baseline rows stay as
+        harmless orphans (same convention as delete_mail). Returns count."""
+        res = self._mails.delete_many({"user_id": user_id})
+        return res.deleted_count
+
     def delete_mail(self, mail_id):
         from bson import ObjectId
         try:
@@ -187,6 +193,12 @@ class SqliteStore:
         with self._lock:
             r = self.conn.execute("SELECT * FROM mails WHERE id = ?", (mail_id,)).fetchone()
             return dict(r) if r else None
+
+    def delete_all_mails(self, user_id):
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM mails WHERE user_id = ?", (user_id,))
+            self.conn.commit()
+            return cur.rowcount
 
     def delete_mail(self, mail_id):
         with self._lock:

@@ -33,7 +33,8 @@ HELP = (
     "❓ <b>How to use</b>\n\n"
     "➕ <b>Generate Gmail</b> — mint a fresh @gmail.com address.\n"
     "📥 <b>Check Inbox</b> — read mail for any address manually.\n"
-    "🗑 <b>Delete Mail</b> — remove an address (mail stops being polled).\n"
+    "🗑 <b>Delete Mail</b> — remove one address.\n"
+    "🗑 <b>Delete All</b> — wipe every address at once.\n"
     "🔐 <b>Create X Acc</b> — send <code>/createx jak.sen.d.a.n.m.ar.k@gmail.com</code> → I signup on X, poll OTP, DM you OTP, reply OTP → I save session file.\n"
     "📊 <b>Stats</b> — your totals.\n\n"
     "1️⃣ Press <b>Generate</b>, copy the address.\n"
@@ -148,6 +149,8 @@ class Handler:
             self._show_mail_list(chat_id, user_id, page=0)
         elif text == "🗑 Delete Mail":
             self._show_mail_list(chat_id, user_id, page=0)
+        elif text == "🗑 Delete All":
+            self._delete_all_confirm(chat_id, user_id)
         elif text == "📊 Stats":
             self._stats(chat_id, user_id)
         elif text == "❓ Help":
@@ -437,6 +440,24 @@ class Handler:
                 self.api.send_message(chat_id, f"❌ Verify error: {esc(str(e)[:200])}", parse_mode="HTML")
         threading.Thread(target=run, daemon=True).start()
 
+    def _delete_all_confirm(self, chat_id, user_id):
+        """Count the user's mails and ask for confirmation before wiping."""
+        mails = db.list_mails(user_id)
+        n = len(mails)
+        if not n:
+            self.api.send_message(
+                chat_id, "📭 You have no mails to delete.",
+                reply_markup=kb.main_menu())
+            return
+        self.api.send_message(
+            chat_id,
+            f"🗑 <b>Delete ALL your mails?</b>\n\n"
+            f"• {n} address(es) will be removed\n"
+            f"• polling stops for every one of them\n"
+            f"• this cannot be undone\n\n"
+            f"Are you sure?",
+            parse_mode="HTML", reply_markup=kb.confirm_delete_all(n))
+
     def _show_mail_list(self, chat_id, user_id, page=0):
         mails = db.list_mails(user_id)
         if not mails:
@@ -504,6 +525,17 @@ class Handler:
                 chat_id, message_id, f"✅ Deleted <code>{esc(mail['address'])}</code>.",
                 parse_mode="HTML")
             self.api.answer_callback(cb_id, "Deleted")
+        elif data == "delall:yes":
+            n = db.delete_all_mails(user_id)
+            self.api.edit_message_text(
+                chat_id, message_id,
+                f"🗑 <b>Deleted ALL your mails</b>\n"
+                f"Removed {n} address(es) — polling stopped for all of them.",
+                parse_mode="HTML")
+            self.api.answer_callback(cb_id, f"Deleted {n}")
+        elif data == "delall:no":
+            self.api.edit_message_text(chat_id, message_id, "👍 Kept everything.")
+            self.api.answer_callback(cb_id)
         elif data == "genmore":
             self.api.answer_callback(cb_id, "Generating…")
             self._generate(chat_id, user_id, skip_cooldown=True)
