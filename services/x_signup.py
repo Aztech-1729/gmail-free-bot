@@ -149,14 +149,14 @@ def initiate_signup(email: str) -> XSignupSession:
             flow_tok = j.get("flow_token") or j.get("flowToken")
             if flow_tok:
                 sess.flow_token = flow_tok
-            # If flow asks for phone, surface it
+            # Log phone/captcha subtasks but don't fail — OTP may still be sent; verify step will handle
             subtasks = j.get("subtasks") or []
             for st in subtasks:
                 sid = st.get("subtask_id") or st.get("subtaskId") or ""
                 if "phone" in sid.lower():
-                    raise XSignupError("X requires phone verification for this signup — try a different gmail")
+                    log.warning("X flow wants phone for %s — continuing, OTP may still work", email)
                 if "captcha" in sid.lower() or "arkose" in sid.lower():
-                    raise XSignupError("X requires captcha — try again in a minute or use different IP")
+                    log.warning("X flow wants captcha for %s", email)
         # If flow didn't error, treat as initiated — OTP should arrive via email poller
         log.info("x_signup initiated email=%s handle=%s guest=%s", email, handle, guest_tok[:8])
         return sess
