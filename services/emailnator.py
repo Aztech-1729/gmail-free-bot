@@ -215,13 +215,30 @@ class EmailnatorClient:
                 self._set_cached(address, result)
                 return result
             except EmailnatorError:
+                # 429 after retries — return cached/empty instead of hard error so poller keeps going
+                if "429" in str(e) or "rate limited" in str(e).lower():
+                    cached = self._get_cached(address)
+                    if cached is not None:
+                        return cached
+                    return []
                 raise
             except Exception as e:
                 self._reset_session()
                 if attempt == 4:
+                    # final failure — return cached/empty for 429-driven cases
+                    cached = self._get_cached(address)
+                    if cached is not None:
+                        return cached
+                    # surface as empty so Check Inbox shows "No new mail" not error
+                    if "429" in str(e):
+                        return []
                     raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
                 time.sleep(0.4 * (attempt + 1))
-        raise EmailnatorError("list failed after retries")
+        # exhausted 429 retries — return cached/empty, don't raise
+        cached = self._get_cached(address)
+        if cached is not None:
+            return cached
+        return []
 
     def _get_cached(self, address: str) -> Optional[List[dict]]:
         with self._cache_lock:
