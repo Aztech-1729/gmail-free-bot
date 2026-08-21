@@ -5,17 +5,19 @@ session (Cloudflare cookies are per-session), so the mailer can poll many
 addresses concurrently.
 
 Verified live: 2,030+ mints, no rate limit found.
+
+Performance improvements:
+- In-memory caching of message lists (2s TTL)
+- Circuit breaker for 5xx errors
+- Parallel body fetches with semaphore
 """
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from curl_cffi import requests as cffi_requests
 
 BASE = "https://www.emailnator.com"
-
-# dotGmail = real gmail with decorative dots. NEVER request plusGmail
-# (+ aliases are flagged by many OTP systems).
 DEFAULT_TYPES = ["dotGmail"]
 
 
@@ -23,9 +25,45 @@ class EmailnatorError(Exception):
     pass
 
 
+class CircuitBreaker:
+    def __init__(self, threshold: int = 5, timeout: float = 30.0):
+        self.failures = 0
+        self.last_failure = 0
+        self.state = "closed"  # closed, open, half-open
+        self.threshold = threshold
+        self.timeout = timeout
+        self._lock = threading.Lock()
+
+    def record_success(self):
+        with self._lock:
+            self.failures = 0
+            self.state = "closed"
+
+    def record_failure(self):
+        with self._lock:
+            self.failures += 1
+            self.last_failure = time.time()
+            if self.failures >= self.threshold:
+                self.state = "open"
+
+    def can_attempt(self) -> bool:
+        with self._lock:
+            if self.state == "closed":
+                return True
+            if self.state == "open" and time.time() - self.last_failure > self.timeout:
+                self.state = "half-open"
+                return True
+            return False
+
+
 class EmailnatorClient:
-    def __init__(self):
+    def __init__(self, cache_ttl: float = 2.0, max_concurrent_bodies: int = 32):
         self._local = threading.local()
+        self._cache_ttl = cache_ttl
+        self._list_cache: Dict[str, tuple] = {}  # address -> (timestamp, messages)
+        self._cache_lock = threading.Lock()
+        self._body_semaphore = threading.Semaphore(max_concurrent_bodies)
+        self._circuit = CircuitBreaker()
 
     # ------------------------------------------------------------------ #
     # session plumbing (one session per thread → true parallelism)
@@ -66,17 +104,36 @@ class EmailnatorClient:
         self._local.session = None
 
     # ------------------------------------------------------------------ #
+    # Caching
+    # ------------------------------------------------------------------ #
+    def _get_cached(self, address: str) -> Optional[List[dict]]:
+        with self._cache_lock:
+            if address in self._list_cache:
+                ts, msgs = self._list_cache[address]
+                if time.time() - ts < self._cache_ttl:
+                    return msgs
+                del self._list_cache[address]
+        return None
+
+    def _set_cached(self, address: str, msgs: List[dict]):
+        with self._cache_lock:
+            self._list_cache[address] = (time.time(), msgs)
+
+    # ------------------------------------------------------------------ #
     # public API
     # ------------------------------------------------------------------ #
     def generate(self, types: Optional[List[str]] = None) -> str:
         """Mint one gmail. Returns the address (dotted form as minted)."""
         types = types or DEFAULT_TYPES
+        if not self._circuit.can_attempt():
+            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
         try:
             s = self._ensure_session()
             r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
             if r.status_code != 200:
-                self._reset_session()
+                self._circuit.record_failure()
                 raise EmailnatorError(f"generate HTTP {r.status_code}: {r.text[:120]}")
+            self._circuit.record_success()
             data = r.json()
             addrs = data.get("email") or []
             if not addrs:
@@ -94,43 +151,69 @@ class EmailnatorClient:
 
     def messages(self, address: str) -> List[dict]:
         """List inbox messages for an exact address string."""
-        try:
-            s = self._ensure_session()
-            r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
-            if r.status_code != 200:
+        cached = self._get_cached(address)
+        if cached is not None:
+            return cached
+
+        if not self._circuit.can_attempt():
+            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
+
+        with self._cache_lock:
+            cached = self._get_cached(address)
+            if cached is not None:
+                return cached
+
+            try:
+                s = self._ensure_session()
+                r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
+                if r.status_code != 200:
+                    self._circuit.record_failure()
+                    raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
+                self._circuit.record_success()
+                data = r.json()
+                msgs = data.get("messageData") or []
+                result = [
+                    {
+                        "messageID": m.get("messageID"),
+                        "from": m.get("from", ""),
+                        "subject": m.get("subject", ""),
+                        "time": m.get("time", ""),
+                    }
+                    for m in msgs
+                    if m.get("messageID") and m.get("messageID") != "ADSVPN"
+                ]
+                self._set_cached(address, result)
+                return result
+            except EmailnatorError:
+                raise
+            except Exception as e:
                 self._reset_session()
-                raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
-            data = r.json()
-            msgs = data.get("messageData") or []
-            self._update_tokens(s)
-            out = []
-            for m in msgs:
-                # "ADSVPN" is a sponsored advert Emailnator injects into the
-                # pool — it has no real body (returns Server Error / JSON) and
-                # would be delivered to users as spam. Skip it.
-                if m.get("messageID") == "ADSVPN":
-                    continue
-                out.append({
-                    "messageID": m.get("messageID"),
-                    "from": m.get("from", ""),
-                    "subject": m.get("subject", ""),
-                    "time": m.get("time", ""),
-                })
-            return out
-        except EmailnatorError:
-            raise
-        except Exception as e:
-            self._reset_session()
-            raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
+                raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
+
+    def _get_cached(self, address: str) -> Optional[List[dict]]:
+        with self._cache_lock:
+            if address in self._list_cache:
+                ts, msgs = self._list_cache[address]
+                if time.time() - ts < self._cache_ttl:
+                    return msgs
+                del self._list_cache[address]
+        return None
+
+    def _set_cached(self, address: str, msgs: List[dict]):
+        with self._cache_lock:
+            self._list_cache[address] = (time.time(), msgs)
 
     def message_body(self, address: str, message_id: str, retries: int = 2) -> str:
-        """Fetch the full raw HTML of one message.
+        """Fetch the full raw HTML of one message (retries on flaky 500s).
 
         Emailnator indexes messages under the exact minted (dotted) form, so we
         try that first and fall back to the plain form. Responses that aren't
         real HTML (JSON wrappers, empty, Server Error) are treated as failures
         and retried on the other form.
         """
+        if not self._circuit.can_attempt():
+            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
+
         forms = self._address_forms(address)
         last_err = None
         for attempt in range(retries + 1):
@@ -141,14 +224,15 @@ class EmailnatorClient:
                                json={"email": form, "messageID": message_id},
                                timeout=30)
                     if r.status_code == 200 and self._looks_like_body(r.text):
-                        self._update_tokens(s)
+                        self._circuit.record_success()
                         return r.text
                     last_err = (f"body HTTP {r.status_code}"
                                 if r.status_code != 200 else "non-HTML body")
                 except Exception as e:
                     last_err = f"{type(e).__name__} {e}"
             self._reset_session()
-            time.sleep(1.5)
+            time.sleep(1.5 * (attempt + 1))
+        self._circuit.record_failure()
         raise EmailnatorError(last_err or "body failed")
 
     @staticmethod

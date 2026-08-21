@@ -1,0 +1,150 @@
+"""Async background mail poller — high performance with parallel body fetches."""
+import asyncio
+import logging
+import tempfile
+import os
+from typing import Dict, List, Optional, Any
+
+from services.emailnator_async import AsyncEmailnatorClient, EmailnatorError
+from services.extractor import (esc, extract_codes, parse_headers, render_mail,
+                                safe_id, strip_tags)
+
+log = logging.getLogger("async_mailer")
+
+
+class AsyncMailer:
+    def __init__(self, api, database, emailnator: AsyncEmailnatorClient,
+                 interval: int = 3, max_concurrent_mailboxes: int = 16,
+                 max_concurrent_bodies: int = 32):
+        self.api = api
+        self.db = database
+        self.emailnator = emailnator
+        self.interval = max(3, interval)
+        self.max_mailboxes = max_concurrent_mailboxes
+        self.max_bodies = max_concurrent_bodies
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._sem_mailboxes = asyncio.Semaphore(max_concurrent_mailboxes)
+        self._sem_bodies = asyncio.Semaphore(max_concurrent_bodies)
+
+    async def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self):
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _loop(self):
+        while self._running:
+            start = time.time()
+            try:
+                mails = self.db.all_mails()
+                if mails:
+                    await asyncio.gather(*[
+                        self._poll_mail(mail) for mail in mails
+                    ])
+            except Exception as e:
+                log.warning("poller round failed: %s", e)
+            elapsed = time.time() - start
+            await asyncio.sleep(max(1.0, self.interval - elapsed))
+
+    async def _poll_mail(self, mail: dict):
+        async with self._sem_mailboxes:
+            mail_id = mail["id"]
+            if not self.db.get_mail(mail_id):
+                return
+
+            dotted = mail["address"]
+            plain = mail.get("plain_form") or dotted
+            show_addr = dotted
+
+            # Fetch messages for both forms in parallel
+            forms = [dotted] if dotted == plain else [dotted, plain]
+            messages_dict = {}
+
+            async def fetch_form(form):
+                try:
+                    msgs = await self.emailnator.messages(form)
+                    for m in msgs:
+                        mid = m.get("messageID")
+                        if mid:
+                            messages_dict[mid] = m
+                except EmailnatorError as e:
+                    log.debug("list failed for %s: %s", form, e)
+
+            await asyncio.gather(*[fetch_form(f) for f in forms])
+
+            # Process messages concurrently with body semaphore
+            if messages_dict:
+                body_tasks = []
+                for mid, msg in messages_dict.items():
+                    if self.db.is_delivered(mail_id, mid):
+                        continue
+                    if self.db.is_baseline(mail_id, mid):
+                        continue
+                    body_tasks.append(self._deliver(mail, msg, show_addr, mid))
+
+                if body_tasks:
+                    await asyncio.gather(*body_tasks, return_exceptions=True)
+
+    async def _deliver(self, mail: dict, msg: dict, show_addr: str, message_id: str):
+        async with self._sem_bodies:
+            user_id = mail["user_id"]
+            dotted = mail["address"]
+            plain = mail.get("plain_form") or dotted
+
+            sender = msg.get("from", "Unknown")
+            subject = msg.get("subject", "(no subject)")
+            recv_time = msg.get("time", "")
+
+            # Fetch body (tries dotted first, plain fallback handled internally)
+            try:
+                body_html = await self.emailnator.message_body(dotted, message_id)
+            except EmailnatorError as e:
+                log.info("body fetch failed for %s: %s", message_id, e)
+                body_html = ""
+
+            headers = parse_headers(body_html) if body_html else {}
+            sender = headers.get("from") or sender
+            subject = headers.get("subject") or subject
+            recv_time = headers.get("time") or recv_time
+
+            plain_text = strip_tags(body_html)
+            codes = extract_codes(plain_text)
+
+            # 1) Full mail text
+            text = render_mail(dotted, sender, subject, recv_time, plain_text, codes)
+
+            # Send text (non-fatal)
+            text_message_id = None
+            try:
+                res = self.api.send_message(user_id, text, parse_mode="HTML")
+                if res.get("ok"):
+                    text_message_id = res["result"]["message_id"]
+            except Exception as e:
+                log.warning("text send failed for %s: %s", message_id, e)
+
+            # Send HTML as reply
+            if text_message_id:
+                sid = safe_id(message_id)
+                html_content = (body_html or f"<html><body><p>From: {esc(sender)}</p>"
+                                        f"<p>Subject: {esc(subject)}</p></body></html>").encode("utf-8")
+                try:
+                    from io import BytesIO
+                    res = self.api.send_document(
+                        user_id, BytesIO(html_content),
+                        filename=f"{sid}.html",
+                        caption=f"🌐 <b>HTML file</b> — {esc(subject[:60])}",
+                        parse_mode="HTML", reply_to_message_id=text_message_id)
+                except Exception as e:
+                    log.warning("html attach failed for %s: %s", message_id, e)
+
+            self.db.mark_delivered(mail["id"], message_id)

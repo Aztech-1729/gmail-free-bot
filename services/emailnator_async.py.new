@@ -1,0 +1,208 @@
+"""Async Emailnator client with connection pooling, caching, and circuit breaker."""
+import asyncio
+import logging
+import time
+from typing import List, Optional, Dict, Any
+from dataclasses import dataclass, field
+from functools import lru_cache
+
+import aiohttp
+
+BASE = "https://www.emailnator.com"
+DEFAULT_TYPES = ["dotGmail"]
+
+log = logging.getLogger("emailnator_async")
+
+
+@dataclass
+class CircuitBreaker:
+    failures: int = 0
+    last_failure: float = 0
+    state: str = "closed"  # closed, open, half-open
+    threshold: int = 5
+    timeout: float = 30.0
+
+    def record_success(self):
+        self.failures = 0
+        self.state = "closed"
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure = time.time()
+        if self.failures >= self.threshold:
+            self.state = "open"
+
+    def can_attempt(self) -> bool:
+        if self.state == "closed":
+            return True
+        if self.state == "open" and time.time() - self.last_failure > self.timeout:
+            self.state = "half-open"
+            return True
+        return False
+
+
+class AsyncEmailnatorClient:
+    def __init__(self, session: aiohttp.ClientSession, cache_ttl: float = 2.0):
+        self._session = session
+        self._cache_ttl = cache_ttl
+        self._list_cache: Dict[str, tuple] = {}  # address -> (timestamp, messages)
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._circuit = CircuitBreaker()
+        self._xsrf_token: Optional[str] = None
+        self._session_cookie: Optional[str] = None
+
+    def _get_lock(self, key: str) -> asyncio.Lock:
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
+
+    async def _ensure_session(self):
+        if self._xsrf_token and self._session_cookie:
+            return
+        async with self._get_lock("session") as lock:
+            if self._xsrf_token and self._session_cookie:
+                return
+            async with self._session.get(BASE + "/") as r:
+                cookies = r.cookies
+                self._xsrf_token = cookies.get("XSRF-TOKEN")
+                self._session_cookie = cookies.get("gmailnator_session")
+                if self._xsrf_token:
+                    self._xsrf_token = self._xsrf_token.value.replace("%3D", "=")
+                    if self._session_cookie:
+                        self._session.cookie_jar.update_cookies({
+                            "XSRF-TOKEN": self._xsrf_token,
+                            "gmailnator_session": self._session_cookie.value
+                        })
+
+    def _cache_key(self, address: str) -> str:
+        return f"list:{address}"
+
+    def _get_cached(self, address: str) -> Optional[List[dict]]:
+        key = self._cache_key(address)
+        if key in self._list_cache:
+            ts, msgs = self._list_cache[key]
+            if time.time() - ts < self._cache_ttl:
+                return msgs
+            del self._list_cache[key]
+        return None
+
+    def _set_cached(self, address: str, msgs: List[dict]):
+        key = self._cache_key(address)
+        self._list_cache[key] = (time.time(), msgs)
+
+    async def generate(self, types: Optional[List[str]] = None) -> str:
+        types = types or DEFAULT_TYPES
+        if not self._circuit.can_attempt():
+            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
+
+        await self._ensure_session()
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Content-Type": "application/json",
+            "Origin": BASE,
+            "Referer": BASE + "/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        if self._xsrf_token:
+            headers["X-Xsrf-Token"] = self._xsrf_token
+
+        async with self._session.post(f"{BASE}/generate-email", json={"email": types}, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            if r.status != 200:
+                self._circuit.record_failure()
+                raise EmailnatorError(f"generate HTTP {r.status}: {await r.text()}")
+            self._circuit.record_success()
+            data = await r.json()
+            addrs = data.get("email") or []
+            if not addrs:
+                raise EmailnatorError("empty response from generate-email")
+            addr = addrs[0]
+            if "+" in addr:
+                raise EmailnatorError("got a + alias — retry")
+            return addr
+
+    async def messages(self, address: str) -> List[dict]:
+        cached = self._get_cached(address)
+        if cached is not None:
+            return cached
+
+        if not self._circuit.can_attempt():
+            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
+
+        await self._ensure_session()
+        async with self._get_lock(f"list:{address}"):
+            cached = self._get_cached(address)
+            if cached is not None:
+                return cached
+
+            headers = {
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Content-Type": "application/json",
+                "Origin": BASE,
+                "Referer": BASE + "/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+            if self._xsrf_token:
+                headers["X-Xsrf-Token"] = self._xsrf_token
+
+            async with self._session.post(f"{BASE}/message-list", json={"email": address}, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                if r.status != 200:
+                    self._circuit.record_failure()
+                    raise EmailnatorError(f"list HTTP {r.status}: {await r.text()}")
+                self._circuit.record_success()
+                data = await r.json()
+                msgs = data.get("messageData") or []
+                result = [
+                    {
+                        "messageID": m.get("messageID"),
+                        "from": m.get("from", ""),
+                        "subject": m.get("subject", ""),
+                        "time": m.get("time", ""),
+                    }
+                    for m in msgs
+                    if m.get("messageID") and m.get("messageID") != "ADSVPN"
+                ]
+                self._set_cached(address, result)
+                return result
+
+    async def message_body(self, address: str, message_id: str, retries: int = 2) -> str:
+        if not self._circuit.can_attempt():
+            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
+
+        await self._ensure_session()
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                headers = {
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Content-Type": "application/json",
+                    "Origin": BASE,
+                    "Referer": BASE + "/",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                    "X-Requested-With": "XMLHttpRequest",
+                }
+                if self._xsrf_token:
+                    headers["X-Xsrf-Token"] = self._xsrf_token
+
+                async with self._session.post(f"{BASE}/message-list", json={"email": address, "messageID": message_id}, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    if r.status == 200:
+                        text = await r.text()
+                        if text and '"message": "Server Error"' not in text:
+                            self._circuit.record_success()
+                            return text
+                        last_err = "emailnator server error for this message"
+                    else:
+                        last_err = f"body HTTP {r.status}"
+            except Exception as e:
+                last_err = f"{type(e).__name__} {e}"
+            await asyncio.sleep(1.5 * (attempt + 1))
+        self._circuit.record_failure()
+        raise EmailnatorError(last_err or "body failed")
+
+
+class EmailnatorError(Exception):
+    pass

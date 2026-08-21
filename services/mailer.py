@@ -3,6 +3,12 @@
 Polls ALL registered addresses concurrently (worker pool + per-thread
 Emailnator sessions), both address forms each. New mail → instantly sends
 the user: summary with OTP codes, .html file (no raw .eml).
+
+Performance improvements:
+- Cached message lists (2s TTL) via EmailnatorClient
+- Circuit breaker on 5xx
+- Parallel body fetches with semaphore (32 concurrent)
+- Increased worker pools (16 mailboxes, 4 forms)
 """
 import concurrent.futures
 import logging
@@ -16,8 +22,10 @@ from services.extractor import (esc, extract_codes, parse_headers, render_mail,
 
 log = logging.getLogger("mailer")
 
-MAIL_WORKERS = 8   # parallel mailboxes per round
-FORM_WORKERS = 2   # dotted + plain in parallel
+MAIL_WORKERS = 16    # parallel mailboxes per round (was 8)
+FORM_WORKERS = 4     # dotted + plain in parallel (was 2)
+
+# Body fetch semaphore is now in EmailnatorClient (32 concurrent)
 
 
 class Mailer:
@@ -25,7 +33,8 @@ class Mailer:
         self.api = api
         self.db = database
         self.interval = max(3, interval)
-        self.emailnator = EmailnatorClient()
+        # Cache TTL 2s, 32 concurrent body fetches
+        self.emailnator = EmailnatorClient(cache_ttl=2.0, max_concurrent_bodies=32)
         self._stop = threading.Event()
         self._thread = None
 

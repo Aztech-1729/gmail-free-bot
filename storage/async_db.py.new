@@ -1,0 +1,142 @@
+"""Async MongoDB storage layer using Motor."""
+import logging
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
+
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
+from config import DATA_DIR, MONGO_DB, MONGO_URI
+
+log = logging.getLogger("async_storage")
+
+
+class AsyncMongoStore:
+    def __init__(self, uri: str, db_name: str):
+        self._client = AsyncIOMotorClient(
+            uri,
+            maxPoolSize=20,
+            minPoolSize=5,
+            serverSelectionTimeoutMS=12000,
+        )
+        self._db: AsyncIOMotorDatabase = self._client[db_name]
+        self._users = self._db["users"]
+        self._mails = self._db["mails"]
+        self._delivered = self._db["delivered"]
+        self._baseline = self._db["baseline"]
+        self.backend = "mongodb"
+
+    async def init_indexes(self):
+        await self._mails.create_index("address", unique=True)
+        await self._delivered.create_index([("mail_id", 1), ("message_id", 1)], unique=True)
+        await self._baseline.create_index([("mail_id", 1), ("message_id", 1)], unique=True)
+
+    async def add_user(self, user_id: int, username: str = ""):
+        await self._users.update_one(
+            {"_id": user_id},
+            {"$set": {"username": username or ""}, "$setOnInsert": {"joined_at": self._now()}},
+            upsert=True,
+        )
+
+    async def add_mail(self, user_id: int, address: str) -> str:
+        plain = address.split("@")[0].replace(".", "") + "@" + address.split("@")[1]
+        doc = {"user_id": user_id, "address": address, "plain_form": plain,
+               "created_at": self._now()}
+        res = await self._mails.insert_one(doc)
+        return str(res.inserted_id)
+
+    async def list_mails(self, user_id: int) -> List[Dict[str, Any]]:
+        cursor = self._mails.find({"user_id": user_id}).sort("_id", -1)
+        mails = []
+        async for m in cursor:
+            m["id"] = str(m.pop("_id"))
+            mails.append(m)
+        return mails
+
+    async def get_mail(self, mail_id: str) -> Optional[Dict[str, Any]]:
+        from bson import ObjectId
+        try:
+            m = await self._mails.find_one({"_id": ObjectId(mail_id)})
+        except Exception:
+            return None
+        if m:
+            m["id"] = str(m.pop("_id"))
+        return m
+
+    async def delete_mail(self, mail_id: str) -> bool:
+        from bson import ObjectId
+        try:
+            oid = ObjectId(mail_id)
+        except Exception:
+            return False
+        res = await self._mails.delete_one({"_id": oid})
+        # Keep delivered/baseline as orphans to prevent re-delivery bursts
+        return res.deleted_count > 0
+
+    async def count_mails(self, user_id: int) -> int:
+        return await self._mails.count_documents({"user_id": user_id})
+
+    async def all_mails(self) -> List[Dict[str, Any]]:
+        mails = []
+        async for m in self._mails.find():
+            m["id"] = str(m.pop("_id"))
+            mails.append(m)
+        return mails
+
+    async def is_delivered(self, mail_id: str, message_id: str) -> bool:
+        return await self._delivered.count_documents(
+            {"mail_id": mail_id, "message_id": message_id}, limit=1) > 0
+
+    async def mark_delivered(self, mail_id: str, message_id: str):
+        try:
+            await self._delivered.insert_one(
+                {"mail_id": mail_id, "message_id": message_id,
+                 "delivered_at": self._now()})
+        except Exception:
+            pass  # duplicate
+
+    async def mark_baseline(self, mail_id: str, message_ids: List[str]):
+        for mid in message_ids:
+            try:
+                await self._baseline.insert_one(
+                    {"mail_id": mail_id, "message_id": mid,
+                     "baselined_at": self._now()})
+            except Exception:
+                pass
+
+    async def is_baseline(self, mail_id: str, message_id: str) -> bool:
+        return await self._baseline.count_documents(
+            {"mail_id": mail_id, "message_id": message_id}, limit=1) > 0
+
+    async def delivered_count(self, user_id: int) -> int:
+        mail_ids = [str(m["_id"]) async for m in self._mails.find({"user_id": user_id}, {"_id": 1})]
+        if not mail_ids:
+            return 0
+        return await self._delivered.count_documents({"mail_id": {"$in": mail_ids}})
+
+    async def user_count(self) -> int:
+        return await self._users.count_documents({})
+
+    async def mail_count_total(self) -> int:
+        return await self._mails.count_documents({})
+
+    @staticmethod
+    def _now():
+        return datetime.now(timezone.utc)
+
+
+# Backward-compatible sync wrapper for existing code
+class AsyncStorageWrapper:
+    def __init__(self, async_store: AsyncMongoStore):
+        self._store = async_store
+        self._loop = asyncio.get_event_loop()
+
+    def __getattr__(self, name):
+        attr = getattr(self._store, name)
+        if callable(attr):
+            def sync_wrapper(*args, **kwargs):
+                return self._loop.run_until_complete(attr(*args, **kwargs))
+            return sync_wrapper
+        return attr
+
+
+import asyncio

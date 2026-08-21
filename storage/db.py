@@ -25,7 +25,13 @@ class MongoStore:
         from bson import ObjectId  # noqa: F401  (keep import for typing clarity)
         from pymongo import MongoClient
 
-        self._client = MongoClient(uri, serverSelectionTimeoutMS=12000)
+        # Connection pooling for high concurrency
+        self._client = MongoClient(
+            uri,
+            maxPoolSize=20,
+            minPoolSize=5,
+            serverSelectionTimeoutMS=12000,
+        )
         self._client.admin.command("ping")  # fail fast if unreachable
         self._db = self._client[db_name]
         self._users = self._db["users"]
