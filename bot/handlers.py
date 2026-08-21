@@ -132,6 +132,8 @@ class Handler:
                     "🔐 <b>Create X Account</b>\n\nSend your dotted gmail:\n<code>/createx jak.sen.d.a.n.m.ar.k@gmail.com</code>\n\n"
                     "I'll signup on X, X will email OTP to that gmail, I'll DM you the OTP → reply with the OTP to finish and get your session file.",
                     parse_mode="HTML")
+        elif text == "🤖 Auto X Acc" or text.startswith("/autocreatex"):
+            self._x_auto_create(chat_id, user_id)
         elif re.fullmatch(r"\d{4,8}", text.strip()):
             # 4-8 digit OTP reply for pending X signup
             with _x_pending_lock:
@@ -438,6 +440,77 @@ class Handler:
                 self.api.send_message(chat_id, f"❌ OTP verify failed: {esc(str(e))}\n\nTry again — reply with correct OTP.", parse_mode="HTML")
             except Exception as e:
                 self.api.send_message(chat_id, f"❌ Verify error: {esc(str(e)[:200])}", parse_mode="HTML")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _x_auto_create(self, chat_id, user_id):
+        """One-tap auto X: generate gmail → signup → auto-poll OTP → verify → session file. No OTP typing."""
+        self.api.send_message(chat_id, "🤖 <b>Auto X — generating gmail & signing up...</b>", parse_mode="HTML")
+        def run():
+            try:
+                # 1. mint gmail
+                email = self.emailnator.generate()
+                try:
+                    db.add_mail(user_id, email)
+                except Exception:
+                    pass
+                self.api.send_message(chat_id, f"📧 Minted <code>{esc(email)}</code> — initiating X signup…", parse_mode="HTML")
+                sess = initiate_signup(email)
+                with _x_pending_lock:
+                    _x_pending[user_id] = sess
+                self.api.send_message(chat_id,
+                    f"✅ X init OK — <b>@{esc(sess.handle)}</b> — polling OTP for 90s…\n<code>{esc(email)}</code>",
+                    parse_mode="HTML")
+                # 2. auto-poll OTP from same gmail for up to 90s
+                otp = None
+                for _ in range(45):  # 45 *2s =90s
+                    time.sleep(2)
+                    try:
+                        msgs = self.emailnator.messages(email)
+                        for m in msgs:
+                            mid = m.get("messageID")
+                            if not mid or mid == "ADSVPN":
+                                continue
+                            try:
+                                body = self.emailnator.message_body(email, mid)
+                            except Exception:
+                                continue
+                            codes = extract_codes(strip_tags(body))
+                            if codes:
+                                # OTP likely 6 digits
+                                cand = [c for c in codes if 4 <= len(c) <= 8]
+                                if cand:
+                                    otp = cand[0]
+                                    break
+                        if otp:
+                            break
+                    except Exception:
+                        pass
+                if not otp:
+                    self.api.send_message(chat_id, f"❌ Auto OTP not found for <code>{esc(email)}</code> in 90s. X may not have sent it (phone/captcha). Try <code>/createx {esc(email)}</code> manually.", parse_mode="HTML")
+                    return
+                self.api.send_message(chat_id, f"🔑 Auto OTP found: <code>{esc(otp)}</code> — verifying…", parse_mode="HTML")
+                result = verify_otp_and_create(sess, otp)
+                data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "sessions")
+                os.makedirs(data_dir, exist_ok=True)
+                fname = f"{result['handle']}_{int(time.time())}.json"
+                fpath = os.path.join(data_dir, fname)
+                with open(fpath, "w", encoding="utf-8") as f:
+                    json.dump(result["cookies"], f, indent=2)
+                with open(fpath, "rb") as f:
+                    self.api.send_document(chat_id, f, filename=fname, caption=(
+                        f"✅ <b>Auto X created!</b>\n\n"
+                        f"📧 {esc(result['email'])}\n"
+                        f"👤 <b>@{esc(result['handle'])}</b> — {esc(result['name'])}\n"
+                        f"🔑 <code>{esc(result['password'])}</code>\n"
+                        f"🔑 OTP <code>{esc(otp)}</code> (auto)\n\n"
+                        f"Session file attached."
+                    ), parse_mode="HTML")
+                with _x_pending_lock:
+                    _x_pending.pop(user_id, None)
+            except XSignupError as e:
+                self.api.send_message(chat_id, f"❌ Auto X failed: {esc(str(e))}", parse_mode="HTML")
+            except Exception as e:
+                self.api.send_message(chat_id, f"❌ Auto error: {esc(str(e)[:200])}", parse_mode="HTML")
         threading.Thread(target=run, daemon=True).start()
 
     def _delete_all_confirm(self, chat_id, user_id):
