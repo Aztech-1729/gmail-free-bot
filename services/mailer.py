@@ -133,6 +133,10 @@ class Mailer:
                 # message_body() tries dotted first, plain as fallback.
                 body_html = self.emailnator.message_body(dotted, message_id)
             except EmailnatorError as e:
+                # 429 is transient — don't mark delivered, retry next poll
+                if "429" in str(e) or "rate limited" in str(e).lower():
+                    log.info("body 429 for %s — will retry next poll", message_id)
+                    raise
                 log.info("body fetch failed for %s: %s", message_id, e)
                 body_html = ""
 
@@ -143,6 +147,16 @@ class Mailer:
         recv_time = headers.get("time") or recv_time
 
         plain = strip_tags(body_html)
+        # fallback: if strip left only header or nothing, try body without header
+        if not plain.strip() or plain.strip() == "(no body)":
+            import re
+            try:
+                body_no_hdr = re.sub(r'<div id="subject-header">.*?</div>', '', body_html or "", flags=re.S | re.I)
+                alt = strip_tags(body_no_hdr).strip()
+                if alt:
+                    plain = alt
+            except Exception:
+                pass
         codes = extract_codes(plain)
 
         # 1) The FULL mail as a chat message: headers block + subject + body.
