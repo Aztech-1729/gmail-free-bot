@@ -123,25 +123,36 @@ class Handler:
                 return
             _cooldown[user_id] = now
 
-        status = self.api.send_message(chat_id, "⏳ Generating your gmail…")
-        status_id = status["result"]["message_id"] if status.get("ok") else None
+        # Fire-and-forget status message (non-fatal)
+        status_id = None
+        try:
+            status = self.api.send_message(chat_id, "⏳ Generating your gmail…")
+            status_id = status["result"]["message_id"] if status.get("ok") else None
+        except Exception:
+            pass
 
         # The pool occasionally hands out an address we already store
-        # (unique index) — regenerate up to 3 times before giving up.
+        # (unique index) — regenerate up to 10 times with backoff.
         mail_id = None
         address = None
-        for attempt in range(3):
+        for attempt in range(10):
             try:
                 address = self.emailnator.generate()
                 mail_id = db.add_mail(user_id, address)
                 break
-            except EmailnatorError:
-                continue
-            except Exception:
-                # duplicate address (pool recycle) — try again
-                continue
+            except EmailnatorError as e:
+                log.warning("gen attempt %d: emailnator error: %s", attempt + 1, e)
+            except Exception as e:
+                # duplicate key (pool recycle) or other db error — retry
+                log.warning("gen attempt %d: db/other error: %s", attempt + 1, e)
+            if attempt < 9:
+                time.sleep(0.3 * (attempt + 1))  # 0.3s, 0.6s, 0.9s...
         if not mail_id:
-            self.api.send_message(chat_id, "⚠️ Generation failed.\nTry again in a moment.")
+            # Non-fatal: try to inform user, but don't crash
+            try:
+                self.api.send_message(chat_id, "⚠️ Generation failed.\nTry again in a moment.")
+            except Exception:
+                pass
             return
         plain = address.split("@")[0].replace(".", "") + "@" + address.split("@")[1]
 
@@ -162,19 +173,24 @@ class Handler:
         except Exception as e:
             log.warning("baseline snapshot failed for %s: %s", mail_id, e)
 
-        if status_id:
-            self.api.edit_message_text(
-                chat_id, status_id,
-                f"✅ <b>Your gmail is ready!</b>\n\n"
+        # Final message — try edit, fallback to send; never crash
+        text = (f"✅ <b>Your gmail is ready!</b>\n\n"
                 f"📧 <b>{esc(address)}</b>\n\n"
                 f"Use it anywhere an OTP is needed — I'll forward every mail "
-                f"here instantly with HTML + raw files.",
-                parse_mode="HTML", reply_markup=kb.mail_actions(mail_id))
-        else:
-            self.api.send_message(
-                chat_id,
-                f"✅ <b>Your gmail is ready!</b>\n\n📧 <b>{esc(address)}</b>\n",
-                parse_mode="HTML", reply_markup=kb.mail_actions(mail_id))
+                f"here instantly with HTML + raw files.")
+        kb_markup = kb.mail_actions(mail_id)
+        ok = False
+        if status_id:
+            try:
+                self.api.edit_message_text(chat_id, status_id, text, parse_mode="HTML", reply_markup=kb_markup)
+                ok = True
+            except Exception:
+                pass
+        if not ok:
+            try:
+                self.api.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb_markup)
+            except Exception as e:
+                log.warning("failed to send success msg to %s: %s", user_id, e)
 
     # ------------------------------------------------------------------ #
     def _show_mail_list(self, chat_id, user_id, page=0):
