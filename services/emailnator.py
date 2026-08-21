@@ -169,37 +169,45 @@ class EmailnatorClient:
         if cached is not None:
             return cached
 
-        if not self._circuit.can_attempt():
-            raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
-
-        try:
-            s = self._ensure_session()
-            r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
-            if r.status_code != 200:
-                self._circuit.record_failure(r.status_code)
+        for attempt in range(5):
+            try:
+                if not self._circuit.can_attempt():
+                    raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
+                s = self._ensure_session()
+                r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
+                if r.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    self._reset_session()
+                    continue
                 if r.status_code == 419:
                     self._reset_session()
-                raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
-            self._circuit.record_success()
-            data = r.json()
-            msgs = data.get("messageData") or []
-            result = [
-                {
-                    "messageID": m.get("messageID"),
-                    "from": m.get("from", ""),
-                    "subject": m.get("subject", ""),
-                    "time": m.get("time", ""),
-                }
-                for m in msgs
-                if m.get("messageID") and m.get("messageID") != "ADSVPN"
-            ]
-            self._set_cached(address, result)
-            return result
-        except EmailnatorError:
-            raise
-        except Exception as e:
-            self._reset_session()
-            raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
+                    continue
+                if r.status_code != 200:
+                    self._circuit.record_failure(r.status_code)
+                    raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
+                self._circuit.record_success()
+                data = r.json()
+                msgs = data.get("messageData") or []
+                result = [
+                    {
+                        "messageID": m.get("messageID"),
+                        "from": m.get("from", ""),
+                        "subject": m.get("subject", ""),
+                        "time": m.get("time", ""),
+                    }
+                    for m in msgs
+                    if m.get("messageID") and m.get("messageID") != "ADSVPN"
+                ]
+                self._set_cached(address, result)
+                return result
+            except EmailnatorError:
+                raise
+            except Exception as e:
+                self._reset_session()
+                if attempt == 4:
+                    raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
+                time.sleep(2 ** attempt)
+        raise EmailnatorError("list failed after retries")
 
     def _get_cached(self, address: str) -> Optional[List[dict]]:
         with self._cache_lock:
@@ -234,6 +242,10 @@ class EmailnatorClient:
                     r = s.post(f"{BASE}/message-list",
                                json={"email": form, "messageID": message_id},
                                timeout=30)
+                    if r.status_code == 429:
+                        time.sleep(2 ** attempt)
+                        self._reset_session()
+                        continue
                     if r.status_code == 200 and self._looks_like_body(r.text):
                         self._circuit.record_success()
                         return r.text
