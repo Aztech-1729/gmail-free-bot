@@ -175,30 +175,30 @@ class Handler:
             pass
 
         # 🔒 GMAIL-ONLY generation — real @gmail.com, nothing else.
-        #   Path 1: Playwright WAF bypass (proxy-rotated, no effective limit)
-        #   Path 2: legacy curl_cffi client (also real @gmail.com)
+        #   Path 1: fixed curl_cffi client (XSRF-decoded — the 419 killer,
+        #           verified Aug 2026: 200s on generate/messages/body, no
+        #           browser needed, works on any VPS)
+        #   Path 2: Playwright WAF-bypass arsenal (proxy-rotated backup)
         #   Both paths are gmail-only; anything else is discarded.
         mail_id = None
         address = None
         provider = "emailnator"
-        mailer = None
-        try:
-            mailer = get_mailer()
-            res = mailer.generate()
-            address = res["address"]
-        except Exception as e:
-            log.warning("gmail (waf-bypass) generate failed: %s — legacy fallback", e)
+        for attempt in range(10):
+            try:
+                address = self.emailnator.generate()
+                break
+            except EmailnatorError as e2:
+                log.warning("gen attempt %d: %s", attempt + 1, e2)
+            except Exception as e2:
+                log.warning("gen attempt %d: %s", attempt + 1, e2)
+            if attempt < 9:
+                time.sleep(min(2 ** attempt + 0.5, 8))
         if not address:
-            for attempt in range(10):
-                try:
-                    address = self.emailnator.generate()
-                    break
-                except EmailnatorError as e2:
-                    log.warning("legacy gen attempt %d: %s", attempt + 1, e2)
-                except Exception as e2:
-                    log.warning("legacy gen attempt %d: %s", attempt + 1, e2)
-                if attempt < 9:
-                    time.sleep(min(2 ** attempt + 0.5, 8))
+            try:
+                res = get_mailer().generate()
+                address = res["address"]
+            except Exception as e:
+                log.warning("arsenal fallback failed too: %s", e)
         if address and "gmail.com" not in str(address):
             log.warning("non-gmail address discarded: %s", address)
             address = None
@@ -216,10 +216,9 @@ class Handler:
                 self.api.send_message(
                     chat_id,
                     "⚠️ <b>Generation failed.</b>\n\n"
-                    "🔧 Gmail-only mode needs Chromium on the server:\n"
-                    "<code>pip install playwright</code>\n"
-                    "<code>playwright install chromium --with-deps</code>\n\n"
-                    "Then restart the bot.",
+                    "Emailnator is throttling right now — the bot auto-retries "
+                    "with fresh sessions and backoff.\n\n"
+                    "Try again in a moment — no setup needed on your side.",
                     parse_mode="HTML")
             except Exception:
                 pass

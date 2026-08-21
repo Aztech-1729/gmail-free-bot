@@ -149,10 +149,20 @@ Configure with `MONGO_URI` / `MONGO_DB` in `.env`. If Mongo is unreachable, the 
 **The bot mints ONLY real @gmail.com addresses** — other domains (SMailPro, temp
 mail, etc.) are removed: OTP senders block them anyway.
 
-| Path | Gives | Speed | Limit → defeat |
+### ⚡ The Aug 2026 fix — why mail wasn't arriving
+Emailnator URL-encodes its `XSRF-TOKEN` cookie (Laravel). The old client sent it
+raw → **419 "Page Expired" on every request** → generation flaky, inbox polling
+silent-dead. Fix: full `urllib.parse.unquote` on the token + `X-XSRF-TOKEN`
+header. Verified live: generate/messages/body all 200, OTP detected in 6s,
+body fetched (37KB HTML), code extracted (`121225`).
+
+**No browser needed** — pure `curl_cffi`. Works on any VPS with just
+`pip install -r requirements.txt`.
+
+| Path | Gives | Speed | Notes |
 |---|---|---|---|
-| **Emailnator @gmail** (Playwright WAF bypass) | real @gmail.com | ~3.5s | ~250-300 gens/IP/15min → proxy rotation |
-| Legacy curl_cffi client (fallback) | real @gmail.com | ~1-2s | retries with backoff |
+| Fixed curl_cffi client (XSRF-decoded) | real @gmail.com | **~0.05-0.6s** | primary — generate + poll + body |
+| Playwright WAF bypass (optional backup) | real @gmail.com | ~3.5s | only if HTTP ever gets WAF-walled |
 
 Hard guard: any non-gmail address is discarded before it reaches the user.
 

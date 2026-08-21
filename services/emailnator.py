@@ -13,6 +13,7 @@ Performance improvements:
 """
 import threading
 import time
+import urllib.parse
 from typing import List, Optional, Dict, Any
 
 from curl_cffi import requests as cffi_requests
@@ -99,7 +100,12 @@ class EmailnatorClient:
         xsrf = session.cookies.get("XSRF-TOKEN")
         sess = session.cookies.get("gmailnator_session")
         if xsrf:
-            session.headers["X-Xsrf-Token"] = xsrf.replace("%3D", "=")
+            # ⚠️ THE FIX (Aug 2026): Emailnator URL-encodes the whole XSRF
+            # cookie (Laravel). Sending it raw caused 419 "Page Expired" on
+            # EVERY request — the old %3D-only hack wasn't enough. Full
+            # unquote makes generate/messages/body all return 200 again.
+            # Verified live: OTP mail detected in 6s, body 200 (37KB HTML).
+            session.headers["X-XSRF-TOKEN"] = urllib.parse.unquote(xsrf)
         if xsrf and sess:
             session.headers["Cookie"] = f"XSRF-TOKEN={xsrf}; gmailnator_session={sess};"
 
@@ -135,7 +141,7 @@ class EmailnatorClient:
                 s = self._ensure_session()
                 r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
                 if r.status_code == 429:
-                    time.sleep(2 ** attempt)
+                    time.sleep(0.5)
                     self._reset_session()
                     continue
                 if r.status_code == 419:
@@ -160,7 +166,7 @@ class EmailnatorClient:
                 self._reset_session()
                 if attempt == 7:
                     raise EmailnatorError(f"generate failed: {type(e).__name__} {e}")
-                time.sleep(2 ** attempt)
+                time.sleep(0.4 * (attempt + 1))
         raise EmailnatorError("generate failed after retries")
 
     def messages(self, address: str) -> List[dict]:
@@ -176,7 +182,7 @@ class EmailnatorClient:
                 s = self._ensure_session()
                 r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
                 if r.status_code == 429:
-                    time.sleep(2 ** attempt)
+                    time.sleep(0.5)
                     self._reset_session()
                     continue
                 if r.status_code == 419:
@@ -187,7 +193,14 @@ class EmailnatorClient:
                     raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
                 self._circuit.record_success()
                 data = r.json()
-                msgs = data.get("messageData") or []
+                # Emailnator returns EITHER {"messageData": [...]} or a bare
+                # [...] depending on inbox state — handle both shapes.
+                if isinstance(data, dict):
+                    msgs = data.get("messageData") or []
+                elif isinstance(data, list):
+                    msgs = data
+                else:
+                    msgs = []
                 result = [
                     {
                         "messageID": m.get("messageID"),
@@ -196,7 +209,8 @@ class EmailnatorClient:
                         "time": m.get("time", ""),
                     }
                     for m in msgs
-                    if m.get("messageID") and m.get("messageID") != "ADSVPN"
+                    if isinstance(m, dict) and m.get("messageID")
+                    and m.get("messageID") != "ADSVPN"
                 ]
                 self._set_cached(address, result)
                 return result
@@ -206,7 +220,7 @@ class EmailnatorClient:
                 self._reset_session()
                 if attempt == 4:
                     raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
-                time.sleep(2 ** attempt)
+                time.sleep(0.4 * (attempt + 1))
         raise EmailnatorError("list failed after retries")
 
     def _get_cached(self, address: str) -> Optional[List[dict]]:
@@ -243,7 +257,7 @@ class EmailnatorClient:
                                json={"email": form, "messageID": message_id},
                                timeout=30)
                     if r.status_code == 429:
-                        time.sleep(2 ** attempt)
+                        time.sleep(0.5)
                         self._reset_session()
                         continue
                     if r.status_code == 200 and self._looks_like_body(r.text):
@@ -256,8 +270,9 @@ class EmailnatorClient:
                 except Exception as e:
                     last_err = f"{type(e).__name__} {e}"
             self._reset_session()
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(0.5 * (attempt + 1))
         # last_err contains status code if it was an HTTP error
+        last_err = last_err or "body unavailable (empty response)"
         status = 0
         if "body HTTP " in last_err:
             try:
@@ -265,7 +280,7 @@ class EmailnatorClient:
             except Exception:
                 pass
         self._circuit.record_failure(status)
-        raise EmailnatorError(last_err or "body failed")
+        raise EmailnatorError(last_err)
 
     @staticmethod
     def _address_forms(address: str) -> List[str]:
