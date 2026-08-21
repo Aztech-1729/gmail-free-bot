@@ -105,14 +105,6 @@ class Handler:
         if text == "/start":
             self.api.send_message(chat_id, WELCOME, parse_mode="HTML",
                                    reply_markup=kb.main_menu())
-        elif text.startswith("/gmails"):
-            self._mass_generate(chat_id, user_id, text)
-        elif text.startswith("/otp"):
-            self._send_otp(chat_id, user_id, text)
-        elif text.startswith("/proxies"):
-            self._proxy_status(chat_id)
-        elif text == "♾️ Mass Gmails":
-            self._mass_generate(chat_id, user_id, "/gmails 10")
         elif text == "➕ Generate Gmail":
             self._generate(chat_id, user_id)
         elif text == "📬 My Mails":
