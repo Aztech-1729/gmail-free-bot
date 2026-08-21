@@ -143,10 +143,11 @@ class Handler:
             except EmailnatorError as e:
                 log.warning("gen attempt %d: emailnator error: %s", attempt + 1, e)
             except Exception as e:
-                # duplicate key (pool recycle) or other db error — retry
                 log.warning("gen attempt %d: db/other error: %s", attempt + 1, e)
             if attempt < 9:
-                time.sleep(0.3 * (attempt + 1))  # 0.3s, 0.6s, 0.9s...
+                # Exponential backoff with jitter for Cloudflare rate limits
+                delay = min(2 ** attempt + 0.5, 8)  # 1.5s, 2.5s, 4.5s, 8.5s...
+                time.sleep(delay)
         if not mail_id:
             # Non-fatal: try to inform user, but don't crash
             try:

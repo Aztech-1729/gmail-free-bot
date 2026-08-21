@@ -26,7 +26,7 @@ class EmailnatorError(Exception):
 
 
 class CircuitBreaker:
-    def __init__(self, threshold: int = 5, timeout: float = 30.0):
+    def __init__(self, threshold: int = 50, timeout: float = 5.0):
         self.failures = 0
         self.last_failure = 0
         self.state = "closed"  # closed, open, half-open
@@ -39,7 +39,10 @@ class CircuitBreaker:
             self.failures = 0
             self.state = "closed"
 
-    def record_failure(self):
+    def record_failure(self, status_code: int = 0):
+        # Don't count rate limits (429) or CSRF (419) as circuit breaker failures
+        if status_code in (429, 419):
+            return
         with self._lock:
             self.failures += 1
             self.last_failure = time.time()
@@ -131,7 +134,9 @@ class EmailnatorClient:
             s = self._ensure_session()
             r = s.post(f"{BASE}/generate-email", json={"email": types}, timeout=30)
             if r.status_code != 200:
-                self._circuit.record_failure()
+                self._circuit.record_failure(r.status_code)
+                if r.status_code == 419:
+                    self._reset_session()  # CSRF token mismatch - reset session
                 raise EmailnatorError(f"generate HTTP {r.status_code}: {r.text[:120]}")
             self._circuit.record_success()
             data = r.json()
@@ -158,37 +163,34 @@ class EmailnatorClient:
         if not self._circuit.can_attempt():
             raise EmailnatorError("Circuit breaker open - Emailnator unavailable")
 
-        with self._cache_lock:
-            cached = self._get_cached(address)
-            if cached is not None:
-                return cached
-
-            try:
-                s = self._ensure_session()
-                r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
-                if r.status_code != 200:
-                    self._circuit.record_failure()
-                    raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
-                self._circuit.record_success()
-                data = r.json()
-                msgs = data.get("messageData") or []
-                result = [
-                    {
-                        "messageID": m.get("messageID"),
-                        "from": m.get("from", ""),
-                        "subject": m.get("subject", ""),
-                        "time": m.get("time", ""),
-                    }
-                    for m in msgs
-                    if m.get("messageID") and m.get("messageID") != "ADSVPN"
-                ]
-                self._set_cached(address, result)
-                return result
-            except EmailnatorError:
-                raise
-            except Exception as e:
-                self._reset_session()
-                raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
+        try:
+            s = self._ensure_session()
+            r = s.post(f"{BASE}/message-list", json={"email": address}, timeout=30)
+            if r.status_code != 200:
+                self._circuit.record_failure(r.status_code)
+                if r.status_code == 419:
+                    self._reset_session()
+                raise EmailnatorError(f"list HTTP {r.status_code}: {r.text[:120]}")
+            self._circuit.record_success()
+            data = r.json()
+            msgs = data.get("messageData") or []
+            result = [
+                {
+                    "messageID": m.get("messageID"),
+                    "from": m.get("from", ""),
+                    "subject": m.get("subject", ""),
+                    "time": m.get("time", ""),
+                }
+                for m in msgs
+                if m.get("messageID") and m.get("messageID") != "ADSVPN"
+            ]
+            self._set_cached(address, result)
+            return result
+        except EmailnatorError:
+            raise
+        except Exception as e:
+            self._reset_session()
+            raise EmailnatorError(f"list failed: {type(e).__name__} {e}")
 
     def _get_cached(self, address: str) -> Optional[List[dict]]:
         with self._cache_lock:
@@ -226,13 +228,22 @@ class EmailnatorClient:
                     if r.status_code == 200 and self._looks_like_body(r.text):
                         self._circuit.record_success()
                         return r.text
+                    if r.status_code == 419:
+                        self._reset_session()
                     last_err = (f"body HTTP {r.status_code}"
                                 if r.status_code != 200 else "non-HTML body")
                 except Exception as e:
                     last_err = f"{type(e).__name__} {e}"
             self._reset_session()
             time.sleep(1.5 * (attempt + 1))
-        self._circuit.record_failure()
+        # last_err contains status code if it was an HTTP error
+        status = 0
+        if "body HTTP " in last_err:
+            try:
+                status = int(last_err.split("body HTTP ")[1].split()[0])
+            except Exception:
+                pass
+        self._circuit.record_failure(status)
         raise EmailnatorError(last_err or "body failed")
 
     @staticmethod
