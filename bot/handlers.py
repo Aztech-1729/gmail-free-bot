@@ -102,6 +102,62 @@ class Handler:
         if not self._require_member(chat_id, user_id):
             return
 
+        # Admin broadcast — reply to any message with /bd to forward it to all users (with forward tag, username visible)
+        if text.strip() == "/bd" and msg.get("reply_to_message"):
+            from config import ADMIN_ID
+            if user_id != ADMIN_ID:
+                self.api.send_message(chat_id, "❌ Admin only.")
+                return
+            reply = msg.get("reply_to_message") or {}
+            from_chat_id = reply.get("chat", {}).get("id") or chat_id
+            message_id = reply.get("message_id")
+            if not message_id:
+                self.api.send_message(chat_id, "❌ Reply to a message with /bd to broadcast it.")
+                return
+            self.api.send_message(chat_id, "📢 <b>Broadcasting...</b>", parse_mode="HTML")
+            def _broadcast():
+                try:
+                    # get all user ids
+                    if db.backend == "mongodb":
+                        user_docs = list(db._db["users"].find({}, {"_id": 1}))
+                        user_ids = [d["_id"] for d in user_docs]
+                    else:
+                        # sqlite fallback
+                        from config import DATA_DIR
+                        import pathlib
+                        p = pathlib.Path(DATA_DIR) / "otp_bot.db"
+                        if p.exists():
+                            import sqlite3 as sq
+                            conn = sq.connect(str(p))
+                            cur = conn.execute("SELECT user_id FROM users")
+                            user_ids = [r[0] for r in cur.fetchall()]
+                            conn.close()
+                        else:
+                            user_ids = []
+                    sent = 0
+                    failed = 0
+                    for uid in user_ids:
+                        try:
+                            # forward preserves Forwarded from + username
+                            self.api._call("forwardMessage", {"chat_id": uid, "from_chat_id": from_chat_id, "message_id": message_id})
+                            sent += 1
+                        except Exception:
+                            failed += 1
+                        # tiny delay to avoid 429
+                        import time as _t
+                        _t.sleep(0.05)
+                    self.api.send_message(chat_id, f"📢 <b>Broadcast done</b>\n\n• total users: <b>{len(user_ids)}</b>\n• sent: <b>{sent}</b>\n• failed: <b>{failed}</b>", parse_mode="HTML")
+                except Exception as e:
+                    self.api.send_message(chat_id, f"❌ Broadcast failed: {e}")
+            import threading
+            threading.Thread(target=_broadcast, daemon=True).start()
+            return
+        elif text.strip() == "/bd":
+            from config import ADMIN_ID
+            if user_id == ADMIN_ID:
+                self.api.send_message(chat_id, "❌ Reply to a message with <code>/bd</code> to broadcast it (forwarded, username visible).", parse_mode="HTML")
+                return
+
         # Admin proxy txt upload — any .txt file from admin is treated as proxy list
         if msg.get("document"):
             from config import ADMIN_ID
