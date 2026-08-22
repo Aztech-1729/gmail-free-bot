@@ -102,6 +102,85 @@ class Handler:
         if not self._require_member(chat_id, user_id):
             return
 
+        # Admin proxy txt upload — any .txt file from admin is treated as proxy list
+        if msg.get("document"):
+            from config import ADMIN_ID
+            if user_id == ADMIN_ID:
+                doc = msg.get("document") or {}
+                fname = (doc.get("file_name") or "").lower()
+                # accept any txt
+                if fname.endswith(".txt") or True:
+                    file_id = doc.get("file_id")
+                    if file_id:
+                        def _handle_proxy_file():
+                            try:
+                                # download file via Bot API
+                                info = self.api._call("getFile", {"file_id": file_id})
+                                if not info.get("ok"):
+                                    self.api.send_message(chat_id, f"❌ getFile failed: {info}")
+                                    return
+                                fpath = info["result"]["file_path"]
+                                import requests as req
+                                r = req.get(f"https://api.telegram.org/file/bot{self.api.token}/{fpath}", timeout=30)
+                                content = r.text
+                                lines = [l.strip() for l in content.splitlines() if l.strip()]
+                                # store in mongo
+                                from storage.proxy_repo import add_proxies, count_proxies
+                                # migrate existing file proxies first
+                                try:
+                                    import os
+                                    fp = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "proxies_alive.txt")
+                                    if os.path.exists(fp):
+                                        with open(fp) as ff:
+                                            add_proxies([l.strip() for l in ff if l.strip()])
+                                except Exception:
+                                    pass
+                                added = add_proxies(lines)
+                                total = count_proxies()
+                                self.api.send_message(chat_id, f"✅ <b>Proxies added</b>\n\n• this file: <b>{added}</b> lines\n• total in DB: <b>{total}</b>\n\nAll generations now rotate from DB.", parse_mode="HTML")
+                            except Exception as e:
+                                self.api.send_message(chat_id, f"❌ Proxy import failed: {e}")
+                        import threading
+                        threading.Thread(target=_handle_proxy_file, daemon=True).start()
+                        return
+            # non-admin txt — ignore
+            self.api.send_message(chat_id, "Use the buttons below ⬇️", reply_markup=kb.main_menu())
+            return
+
+        if text == "/check":
+            from config import ADMIN_ID
+            if user_id != ADMIN_ID:
+                self.api.send_message(chat_id, "❌ Admin only.")
+                return
+            self.api.send_message(chat_id, "🔍 <b>Checking proxies...</b> (may take 30s)", parse_mode="HTML")
+            def _check():
+                try:
+                    from storage.proxy_repo import list_proxies, set_alive
+                    import concurrent.futures, requests as req2
+                    proxies = list_proxies(200)
+                    if not proxies:
+                        self.api.send_message(chat_id, "📭 No proxies in DB. Send a .txt file (ip:port:user:pass per line) to add.")
+                        return
+                    def _alive(p):
+                        proxy = p.get("proxy") or p.get("proxy_url") or str(p)
+                        try:
+                            r = req2.get("https://api.ipify.org?format=json", proxies={"http": proxy, "https": proxy}, timeout=8)
+                            ok = r.status_code == 200
+                        except Exception:
+                            ok = False
+                        set_alive(proxy, ok)
+                        return ok
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+                        results = list(ex.map(_alive, proxies))
+                    alive = sum(1 for x in results if x)
+                    dead = len(results) - alive
+                    self.api.send_message(chat_id, f"📊 <b>Proxy check done</b>\n\n• total: <b>{len(proxies)}</b>\n• alive: <b>{alive}</b>\n• dead: <b>{dead}</b>", parse_mode="HTML")
+                except Exception as e:
+                    self.api.send_message(chat_id, f"❌ Check failed: {e}")
+            import threading
+            threading.Thread(target=_check, daemon=True).start()
+            return
+
         if text == "/start":
             self.api.send_message(chat_id, WELCOME, parse_mode="HTML",
                                    reply_markup=kb.main_menu())

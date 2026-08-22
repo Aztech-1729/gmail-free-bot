@@ -21,6 +21,14 @@ from typing import List, Optional, Dict, Any
 from curl_cffi import requests as cffi_requests
 
 def _random_proxy():
+    # mongo first (admin txt uploads)
+    try:
+        from storage.proxy_repo import get_random_proxy as mongo_proxy
+        mp = mongo_proxy()
+        if mp:
+            return mp
+    except Exception:
+        pass
     try:
         p = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "proxies_alive.txt")
         if not os.path.exists(p):
