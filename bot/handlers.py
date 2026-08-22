@@ -208,7 +208,7 @@ class Handler:
             if user_id != ADMIN_ID:
                 self.api.send_message(chat_id, "❌ Admin only.")
                 return
-            self.api.send_message(chat_id, "🔍 <b>Checking proxies...</b> (may take 30s)", parse_mode="HTML")
+            self.api.send_message(chat_id, "🔍 <b>Checking proxies...</b> (may take 10s)", parse_mode="HTML")
             def _check():
                 try:
                     from storage.proxy_repo import list_proxies, set_alive
@@ -220,13 +220,18 @@ class Handler:
                     def _alive(p):
                         proxy = p.get("proxy") or p.get("proxy_url") or str(p)
                         try:
-                            r = req2.get("https://api.ipify.org?format=json", proxies={"http": proxy, "https": proxy}, timeout=8)
+                            r = req2.get("https://api.ipify.org?format=json", proxies={"http": proxy, "https": proxy}, timeout=4)
                             ok = r.status_code == 200
                         except Exception:
                             ok = False
-                        set_alive(proxy, ok)
+                        try:
+                            set_alive(proxy, ok)
+                        except Exception:
+                            pass
                         return ok
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+                    # limit to 100 for speed
+                    proxies = proxies[:100]
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as ex:
                         results = list(ex.map(_alive, proxies))
                     alive = sum(1 for x in results if x)
                     dead = len(results) - alive
