@@ -139,31 +139,19 @@ class Handler:
         except Exception:
             pass
 
-        # 🔒 GMAIL-ONLY generation — real @gmail.com, nothing else.
-        #   Path 1: fixed curl_cffi client (XSRF-decoded — the 419 killer,
-        #           verified Aug 2026: 200s on generate/messages/body, no
-        #           browser needed, works on any VPS)
-        #   Path 2: Playwright WAF-bypass arsenal (proxy-rotated backup)
-        #   Both paths are gmail-only; anything else is discarded.
+        # 🔒 GMAIL-ONLY generation — proxy-only (every generation rotates Webshare proxy, no direct IP)
         mail_id = None
         address = None
         provider = "emailnator"
+        # proxy-rotated Emailnator (Webshare) — every generation rotates proxy
         for attempt in range(3):
             try:
                 address = self.emailnator.generate()
                 break
-            except EmailnatorError as e2:
-                log.warning("gen attempt %d: %s", attempt + 1, e2)
-            except Exception as e2:
-                log.warning("gen attempt %d: %s", attempt + 1, e2)
-            if attempt < 2:
-                time.sleep(1)
-        if not address:
-            try:
-                res = get_mailer().generate()
-                address = res["address"]
             except Exception as e:
-                log.warning("arsenal fallback failed too: %s", e)
+                log.warning("proxy gen attempt %d: %s", attempt + 1, e)
+                time.sleep(1)
+                address = None
         if address and "gmail.com" not in str(address):
             log.warning("non-gmail address discarded: %s", address)
             address = None
@@ -275,19 +263,12 @@ class Handler:
             for i in range(total):
                 address = None
                 provider = "emailnator"
-                if mailer is not None:
-                    try:
-                        res = mailer.generate()
-                        address = res["address"]
-                        provider = res["provider"]
-                    except Exception:
-                        pass
-                if address is None:
-                    try:
-                        address = self.emailnator.generate()
-                        provider = "emailnator"
-                    except Exception:
-                        address = None
+                try:
+                    address = self.emailnator.generate()
+                except Exception as e:
+                    log.warning("mass proxy gen failed: %s", e)
+                    address = None
+                # proxy-only
                 if address and "gmail.com" in str(address):
                     lines.append(address)
                     try:
